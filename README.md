@@ -38,26 +38,41 @@ ollama pull llama3
 
 ### 2. Prepare your workspace
 
-Clone this bot and the repositories you want it to review side by side under one workspace directory. The bot uses those sibling clones to find optional architecture, API, schema, contribution, and README context.
+Clone each repository you want the bot to review directly inside a workspace
+directory. The directory name and location are up to you; it does not need to
+match the GitHub organization name. Each clone must be named after its GitHub
+repository, because the bot looks for it at
+`LOCAL_WORKSPACE_PATH/<repository-name>`. The bot also reads optional
+architecture, API, schema, contribution, and README context from other
+repository clones in that directory.
 
 ```text
-workspace/
-└── your-org/
-    ├── review-bot/
-    ├── service-one/
-    └── service-two/
+~/code/review-workspace/       # LOCAL_WORKSPACE_PATH
+├── service-one/               # clone of your-org/service-one
+└── service-two/               # clone of your-org/service-two
 ```
 
 ### 3. Configure and run
 
-Set the required environment variables, then run the script:
+Set the required environment variables, then run the script. `GITHUB_ORG` is
+the organization login to search; no special organization-side Review Bot
+installation or configuration is needed. The token must be able to access the
+target repositories, and `GITHUB_USER` must be the account that is requested
+for review on the PRs.
 
-| Variable | Purpose |
-|---|---|
-| `GITHUB_TOKEN` | Personal access token with access to the repositories and permission to read pull requests and post comments. |
-| `GITHUB_USER` | GitHub username the bot acts as. |
-| `GITHUB_ORG` | Organization whose pull requests to check. |
-| `LOCAL_WORKSPACE_PATH` | Parent directory containing your side-by-side repository clones. |
+| Environment variable | When to set it | Example |
+|---|---|---|
+| `GITHUB_TOKEN` | Required. Personal access token with access to the target repositories and permission to read pull requests and post comments. | `GITHUB_TOKEN="github_pat_..."` |
+| `GITHUB_USER` | Required. GitHub username the token belongs to and the username assigned as reviewer. | `GITHUB_USER="octocat"` |
+| `GITHUB_ORG` | Required. Organization login whose open PRs are searched. This can be any organization you have access to; no special org layout is required. | `GITHUB_ORG="your-org"` |
+| `LOCAL_WORKSPACE_PATH` | Required. Existing directory containing local clones of the repositories to review, each directly inside it. | `LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace"` |
+| `AI_PROVIDER` | Optional; defaults to `ollama`. Selects a provider config such as `ollama`, `openai`, `cursor`, or `anthropic`. | `AI_PROVIDER="openai"` |
+| `AI_PROVIDER_CONFIG_DIR` | Optional; defaults to this project's `providers/` directory. Directory containing `<AI_PROVIDER>.json`. | `AI_PROVIDER_CONFIG_DIR="$HOME/review-bot/providers"` |
+| `OLLAMA_URL` | Optional; defaults to `http://localhost:11434`. Overrides the Ollama endpoint. | `OLLAMA_URL="http://localhost:11434"` |
+| `OLLAMA_MODEL` | Optional; defaults to `llama3`. Overrides the Ollama model name. | `OLLAMA_MODEL="llama3"` |
+| `OPENAI_API_KEY` | Required when using the bundled `openai` provider. | `OPENAI_API_KEY="your-openai-api-key"` |
+| `CURSOR_API_KEY` | Required when using the bundled `cursor` provider. | `CURSOR_API_KEY="your-cursor-api-key"` |
+| `ANTHROPIC_API_KEY` | Required when using the bundled `anthropic` provider. | `ANTHROPIC_API_KEY="your-anthropic-api-key"` |
 
 The default provider is local Ollama (`llama3` at `http://localhost:11434`). For example:
 
@@ -65,7 +80,19 @@ The default provider is local Ollama (`llama3` at `http://localhost:11434`). For
 GITHUB_TOKEN="your-token" \
 GITHUB_USER="your-username" \
 GITHUB_ORG="your-org" \
-LOCAL_WORKSPACE_PATH="$HOME/workspace/your-org" \
+LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
+python review_bot.py
+```
+
+For a remote provider, set its selector and API key as well. For example:
+
+```bash
+GITHUB_TOKEN="your-token" \
+GITHUB_USER="your-username" \
+GITHUB_ORG="your-org" \
+LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
+AI_PROVIDER="openai" \
+OPENAI_API_KEY="your-openai-api-key" \
 python review_bot.py
 ```
 
@@ -74,23 +101,31 @@ python review_bot.py
 For hourly reviews, add a cron entry. Keep credentials private: use your system's protected environment or secret-management facility rather than committing real values to a file.
 
 ```cron
-0 * * * * GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_ORG="your-org" LOCAL_WORKSPACE_PATH="$HOME/workspace/your-org" /usr/bin/python3 $HOME/review-bot/review_bot.py >> $HOME/review-bot/review_bot.log 2>&1
+0 * * * * GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_ORG="your-org" LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" /usr/bin/python3 $HOME/review-bot/review_bot.py >> $HOME/review-bot/review_bot.log 2>&1
 ```
 
 The bot records processed `owner/repo#PR:COMMIT_SHA` states in `~/reviewed_prs.txt`. Each posted comment also contains a hidden state marker, allowing the bot to recover if the local state file is lost. A new commit on a PR is treated as a new review.
 
 ## Choose an AI provider
 
-Provider settings live in JSON files in `providers/`. Select one with `AI_PROVIDER` (default: `ollama`); override the config directory with `AI_PROVIDER_CONFIG_DIR`.
+Provider settings live in JSON files in `providers/`. Select one with
+`AI_PROVIDER` (default: `ollama`); override the config directory with
+`AI_PROVIDER_CONFIG_DIR`. The API key environment variable is named in each
+provider config's `api_key_env` field. The bundled remote providers require
+their matching key variable from the table above; keep keys in your protected
+environment or secret manager, never in config files.
 
 | Provider | Config | API style | API key environment variable |
 |---|---|---|---|
 | Ollama (local, default) | `providers/ollama.json` | `ollama` | — |
-| OpenAI | `providers/openai.json` | `openai` | `OPENAI_API_KEY` |
-| Cursor API | `providers/cursor.json` | `openai` | `CURSOR_API_KEY` |
-| Anthropic | `providers/anthropic.json` | `anthropic` | `ANTHROPIC_API_KEY` |
+| OpenAI | `providers/openai.json` | `openai` | `OPENAI_API_KEY` (example: `OPENAI_API_KEY="your-openai-api-key"`) |
+| Cursor API | `providers/cursor.json` | `openai` | `CURSOR_API_KEY` (example: `CURSOR_API_KEY="your-cursor-api-key"`) |
+| Anthropic | `providers/anthropic.json` | `anthropic` | `ANTHROPIC_API_KEY` (example: `ANTHROPIC_API_KEY="your-anthropic-api-key"`) |
 
-For example, use Cursor by setting `AI_PROVIDER=cursor` and providing `CURSOR_API_KEY`. The provider configs are templates for endpoint and model settings; **API keys belong in environment variables, never in config files.**
+For example, use Cursor by setting `AI_PROVIDER="cursor"` and
+`CURSOR_API_KEY="your-cursor-api-key"`. The provider configs are templates for
+endpoint and model settings; **API keys belong in environment variables, never
+in config files.**
 
 OpenAI-compatible endpoints—including Azure OpenAI gateways, OpenRouter, vLLM, and LM Studio—can use the `openai` API style. Add a provider by adding a `<name>.json` config and setting `AI_PROVIDER=<name>`.
 
@@ -109,7 +144,8 @@ Provider configs support these fields:
 }
 ```
 
-`max_payload_chars` limits the combined diff and context sent to the model. The Ollama provider also supports the legacy `OLLAMA_URL` and `OLLAMA_MODEL` environment overrides.
+`max_payload_chars` limits the combined diff and context sent to the model.
+`OLLAMA_URL` and `OLLAMA_MODEL` override the Ollama config's endpoint and model.
 
 > **Privacy note:** a review sends the PR diff and selected repository context to the configured AI provider. Choose a provider and settings that meet your organization's data-handling requirements.
 
