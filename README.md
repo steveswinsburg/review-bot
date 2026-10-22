@@ -108,6 +108,16 @@ LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
 uv run python review_bot.py
 ```
 
+To override the Ollama model:
+```bash
+GITHUB_TOKEN="your-token" \
+GITHUB_USER="your-username" \
+GITHUB_ORG="your-org" \
+OLLAMA_MODEL="llama3" \
+LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
+uv run python review_bot.py
+```
+
 For a remote provider, set its selector and API key as well. For example:
 
 ```bash
