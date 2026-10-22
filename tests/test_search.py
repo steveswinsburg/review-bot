@@ -23,10 +23,12 @@ def test_owner_search_qualifier(owner_type, qualifier):
     github.get_user.assert_called_once_with("owner-name")
 
 
-def test_owner_search_qualifier_legacy_org_skips_lookup():
+def test_owner_search_qualifier_forced_organization_skips_lookup():
     github = mock.Mock()
 
-    assert rb.owner_search_qualifier(github, "org-name", legacy_org=True) == "org"
+    assert rb.owner_search_qualifier(
+        github, "org-name", force_organization=True
+    ) == "org"
     github.get_user.assert_not_called()
 
 

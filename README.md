@@ -54,19 +54,19 @@ repository clones in that directory.
 
 ### 3. Configure and run
 
-Set the required environment variables, then run the script. `GITHUB_OWNER` is
-the login of the organization or personal account whose repositories to search.
-Review Bot detects the account type and uses the corresponding GitHub search.
-No special organization-side installation or configuration is needed. The
-token must be able to access the target repositories, and `GITHUB_USER` must be
-the account that is requested for review on the PRs.
+Set the required environment variables, then run the script. Set either
+`GITHUB_OWNER` to the login of an organization or personal account (Review Bot
+detects the account type), or set `GITHUB_ORG` when you know the owner is an
+organization. No special organization-side installation or configuration is
+needed. The token must be able to access the target repositories, and
+`GITHUB_USER` must be the account that is requested for review on the PRs.
 
 | Environment variable | When to set it | Example |
 |---|---|---|
 | `GITHUB_TOKEN` | Required. Personal access token with access to the target repositories and permission to read pull requests and post comments. | `GITHUB_TOKEN="github_pat_..."` |
 | `GITHUB_USER` | Required. GitHub username the token belongs to and the username assigned as reviewer. | `GITHUB_USER="octocat"` |
-| `GITHUB_OWNER` | Required. Organization or personal-account login whose open PRs are searched. | `GITHUB_OWNER="octocat"` or `GITHUB_OWNER="your-org"` |
-| `GITHUB_ORG` | Deprecated compatibility alias for `GITHUB_OWNER`; when used alone, it is treated as an organization. | `GITHUB_ORG="your-org"` |
+| `GITHUB_OWNER` | Required if `GITHUB_ORG` is not set. Organization or personal-account login whose open PRs are searched; account type is detected automatically. | `GITHUB_OWNER="octocat"` or `GITHUB_OWNER="your-org"` |
+| `GITHUB_ORG` | Required if `GITHUB_OWNER` is not set. Organization login whose open PRs are searched. | `GITHUB_ORG="your-org"` |
 | `LOCAL_WORKSPACE_PATH` | Required. Existing directory containing local clones of the repositories to review, each directly inside it. | `LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace"` |
 | `AI_PROVIDER` | Optional; defaults to `ollama`. Selects a provider config such as `ollama`, `openai`, `cursor`, or `anthropic`. | `AI_PROVIDER="openai"` |
 | `AI_PROVIDER_CONFIG_DIR` | Optional; defaults to this project's `providers/` directory. Directory containing `<AI_PROVIDER>.json`. | `AI_PROVIDER_CONFIG_DIR="$HOME/review-bot/providers"` |
@@ -76,18 +76,19 @@ the account that is requested for review on the PRs.
 | `CURSOR_API_KEY` | Required when using the bundled `cursor` provider. | `CURSOR_API_KEY="your-cursor-api-key"` |
 | `ANTHROPIC_API_KEY` | Required when using the bundled `anthropic` provider. | `ANTHROPIC_API_KEY="your-anthropic-api-key"` |
 
-The default provider is local Ollama (`llama3` at `http://localhost:11434`). For example:
+The default provider is local Ollama (`llama3` at `http://localhost:11434`).
+For an organization, you can use either configuration:
 
 ```bash
 GITHUB_TOKEN="your-token" \
 GITHUB_USER="your-username" \
-GITHUB_OWNER="your-org" \
+GITHUB_ORG="your-org" \
 LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
 python review_bot.py
 ```
 
-For repositories owned by a personal account, use that account's login as
-`GITHUB_OWNER`:
+For repositories owned by a personal account, use `GITHUB_OWNER` with the
+account's login:
 
 ```bash
 GITHUB_TOKEN="your-token" \

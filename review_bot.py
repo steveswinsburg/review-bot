@@ -15,12 +15,13 @@ review as a PR comment.
 Required environment variables:
     GITHUB_TOKEN          Personal Access Token (repo scope).
     GITHUB_USER           The GitHub username the bot acts as.
-    GITHUB_OWNER          The GitHub organization or personal account to scan.
+    GITHUB_OWNER or
+    GITHUB_ORG             The owner to scan (see configuration notes below).
     LOCAL_WORKSPACE_PATH  Parent directory containing repository clones
                           side-by-side.
 
-GITHUB_ORG is accepted as a deprecated alias for GITHUB_OWNER and is treated
-as an organization name.
+Set either GITHUB_OWNER to automatically detect an organization or personal
+account, or GITHUB_ORG when the owner is known to be an organization.
 
 Optional environment variables:
     AI_PROVIDER           Name of the AI provider config to use (default:
@@ -402,9 +403,11 @@ def load_ai_provider(name: str) -> AIProvider:
     )
 
 
-def owner_search_qualifier(gh: Github, owner: str, legacy_org: bool = False) -> str:
+def owner_search_qualifier(
+    gh: Github, owner: str, force_organization: bool = False
+) -> str:
     """Return the GitHub search qualifier for an organization or user owner."""
-    if legacy_org:
+    if force_organization:
         return "org"
 
     owner_type = gh.get_user(owner).type
@@ -565,12 +568,12 @@ def review_pr(pr, repo_full_name: str, provider: AIProvider) -> bool:
 
 def main() -> int:
     owner = GITHUB_OWNER or GITHUB_ORG
-    legacy_org = not GITHUB_OWNER and bool(GITHUB_ORG)
+    force_organization = not GITHUB_OWNER and bool(GITHUB_ORG)
     missing = [
         name for name, value in (
             ("GITHUB_TOKEN", GITHUB_TOKEN),
             ("GITHUB_USER", GITHUB_USER),
-            ("GITHUB_OWNER (or legacy GITHUB_ORG)", owner),
+            ("GITHUB_OWNER or GITHUB_ORG", owner),
             ("LOCAL_WORKSPACE_PATH", str(LOCAL_WORKSPACE_PATH)),
         ) if not value or value == "."
     ]
@@ -596,7 +599,7 @@ def main() -> int:
 
     try:
         gh = Github(GITHUB_TOKEN)
-        qualifier = owner_search_qualifier(gh, owner, legacy_org)
+        qualifier = owner_search_qualifier(gh, owner, force_organization)
         query = (
             f"is:open is:pr {qualifier}:{owner} "
             f"review-requested:{GITHUB_USER}"
