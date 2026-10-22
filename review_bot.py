@@ -4,20 +4,23 @@ Automated local code review bot.
 
 Runs exactly once per invocation (designed for a 60-minute cron job), acting
 under a personal GitHub account via a PAT. It finds open PRs in a target
-organization where the user is a requested reviewer, checks the PR branch out
-into a temporary git worktree inside the locally cloned repository, gathers
-cross-repository architectural context from sibling clones in the workspace,
-sends the combined payload to a configurable AI provider (local Ollama by
-default, or remote providers such as the Cursor API, OpenAI, or Anthropic via
-per-provider config files), and posts the
-resulting review as a PR comment.
+organization or personal account where the user is a requested reviewer,
+checks the PR branch out into a temporary git worktree inside the locally
+cloned repository, gathers cross-repository architectural context from sibling
+clones in the workspace, sends the combined payload to a configurable AI
+provider (local Ollama by default, or remote providers such as the Cursor API,
+OpenAI, or Anthropic via per-provider config files), and posts the resulting
+review as a PR comment.
 
 Required environment variables:
     GITHUB_TOKEN          Personal Access Token (repo scope).
     GITHUB_USER           The GitHub username the bot acts as.
-    GITHUB_ORG            The organization to scan for review requests.
-    LOCAL_WORKSPACE_PATH  Parent directory containing all org repos cloned
-                          side-by-side (e.g. ~/workspace/org_name/).
+    GITHUB_OWNER          The GitHub organization or personal account to scan.
+    LOCAL_WORKSPACE_PATH  Parent directory containing repository clones
+                          side-by-side.
+
+GITHUB_ORG is accepted as a deprecated alias for GITHUB_OWNER and is treated
+as an organization name.
 
 Optional environment variables:
     AI_PROVIDER           Name of the AI provider config to use (default:
@@ -60,6 +63,7 @@ from github import Github, GithubException
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_USER = os.environ.get("GITHUB_USER", "")
+GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "")
 GITHUB_ORG = os.environ.get("GITHUB_ORG", "")
 LOCAL_WORKSPACE_PATH = Path(
     os.path.expanduser(os.environ.get("LOCAL_WORKSPACE_PATH", ""))
@@ -398,6 +402,21 @@ def load_ai_provider(name: str) -> AIProvider:
     )
 
 
+def owner_search_qualifier(gh: Github, owner: str, legacy_org: bool = False) -> str:
+    """Return the GitHub search qualifier for an organization or user owner."""
+    if legacy_org:
+        return "org"
+
+    owner_type = gh.get_user(owner).type
+    if owner_type == "Organization":
+        return "org"
+    if owner_type == "User":
+        return "user"
+    raise ValueError(
+        f"GitHub owner '{owner}' has unsupported account type '{owner_type}'."
+    )
+
+
 REVIEW_PROMPT_TEMPLATE = """You are an elite Enterprise Software Architect \
 with full visibility into the wider local codebase layout of this organization.
 
@@ -545,11 +564,13 @@ def review_pr(pr, repo_full_name: str, provider: AIProvider) -> bool:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    owner = GITHUB_OWNER or GITHUB_ORG
+    legacy_org = not GITHUB_OWNER and bool(GITHUB_ORG)
     missing = [
         name for name, value in (
             ("GITHUB_TOKEN", GITHUB_TOKEN),
             ("GITHUB_USER", GITHUB_USER),
-            ("GITHUB_ORG", GITHUB_ORG),
+            ("GITHUB_OWNER (or legacy GITHUB_ORG)", owner),
             ("LOCAL_WORKSPACE_PATH", str(LOCAL_WORKSPACE_PATH)),
         ) if not value or value == "."
     ]
@@ -575,21 +596,26 @@ def main() -> int:
 
     try:
         gh = Github(GITHUB_TOKEN)
+        qualifier = owner_search_qualifier(gh, owner, legacy_org)
         query = (
-            f"is:open is:pr org:{GITHUB_ORG} "
+            f"is:open is:pr {qualifier}:{owner} "
             f"review-requested:{GITHUB_USER}"
         )
         issues = list(gh.search_issues(query))
     except GithubException as exc:
         log.error("GitHub search failed (will retry next cycle): %s", exc)
         return 1
+    except ValueError as exc:
+        log.error("Could not determine GitHub owner type: %s", exc)
+        return 1
     except Exception as exc:  # network drop, DNS failure, etc.
         log.error("Unexpected error reaching GitHub (will retry next "
                   "cycle): %s", exc)
         return 1
 
-    log.info("Found %d open PR(s) requesting review from %s in org %s.",
-             len(issues), GITHUB_USER, GITHUB_ORG)
+    log.info("Found %d open PR(s) requesting review from %s under %s %s.",
+             len(issues), GITHUB_USER, "organization" if qualifier == "org"
+             else "user", owner)
 
     failures = 0
     for issue in issues:
