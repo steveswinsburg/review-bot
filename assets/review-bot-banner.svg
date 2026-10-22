@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" fill="none">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1200" y2="360" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101A35"/>
+      <stop offset=".55" stop-color="#17264A"/>
+      <stop offset="1" stop-color="#26386A"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="820" y1="42" x2="1143" y2="337" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#69E3D3"/>
+      <stop offset="1" stop-color="#83A8FF"/>
+    </linearGradient>
+    <linearGradient id="card" x1="765" y1="82" x2="1112" y2="292" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#26385E"/>
+      <stop offset="1" stop-color="#1A294A"/>
+    </linearGradient>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#B5C9FF" fill-opacity=".14"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="360" rx="24" fill="url(#background)"/>
+  <path d="M720 0h480v360H720z" fill="url(#dots)"/>
+  <circle cx="1020" cy="171" r="164" fill="#718FFF" fill-opacity=".08"/>
+  <circle cx="1020" cy="171" r="118" stroke="#9CB2FF" stroke-opacity=".14"/>
+  <circle cx="1020" cy="171" r="78" stroke="#9CB2FF" stroke-opacity=".2"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <text x="80" y="92" fill="#81E5D6" font-size="14" font-weight="700" letter-spacing="3">AUTOMATED CODE REVIEW</text>
+    <text x="76" y="165" fill="#FFFFFF" font-size="56" font-weight="750" letter-spacing="-2">review-bot</text>
+    <text x="80" y="207" fill="#C3D0F0" font-size="19">Thoughtful PR reviews, on autopilot.</text>
+    <rect x="80" y="244" width="228" height="38" rx="19" fill="#69E3D3" fill-opacity=".12" stroke="#69E3D3" stroke-opacity=".35"/>
+    <circle cx="101" cy="263" r="5" fill="#69E3D3"/>
+    <text x="116" y="268" fill="#C9FFF7" font-size="13" font-weight="600">YOUR AI. YOUR WORKFLOW.</text>
+  </g>
+
+  <g transform="rotate(-5 959 181)">
+    <rect x="774" y="80" width="342" height="216" rx="18" fill="#0C152B" fill-opacity=".38"/>
+    <rect x="783" y="66" width="342" height="216" rx="18" fill="url(#card)" stroke="#8EA8EA" stroke-opacity=".3"/>
+    <path d="M783 112h342" stroke="#8EA8EA" stroke-opacity=".2"/>
+    <circle cx="806" cy="89" r="5" fill="#FF8192"/>
+    <circle cx="823" cy="89" r="5" fill="#FFC76B"/>
+    <circle cx="840" cy="89" r="5" fill="#69E3D3"/>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">
+      <text x="807" y="141" fill="#83A8FF">@@ review summary</text>
+      <text x="807" y="168" fill="#7CE0B1">+ clearer error handling</text>
+      <text x="807" y="194" fill="#C3D0F0">  tests cover edge cases</text>
+      <text x="807" y="220" fill="#C3D0F0">  context checked ✓</text>
+    </g>
+    <circle cx="1070" cy="247" r="24" fill="url(#glow)"/>
+    <path d="m1059 247 7 7 15-16" stroke="#142344" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <path d="M697 181h48" stroke="#69E3D3" stroke-width="2" stroke-linecap="round" stroke-dasharray="3 8" opacity=".7"/>
+  <circle cx="698" cy="181" r="4" fill="#69E3D3"/>
+</svg>

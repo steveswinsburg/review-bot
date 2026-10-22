@@ -1,48 +1,100 @@
-# review-bot
-A bot that does PR reviews.
+<div align="center">
+  <img src="assets/review-bot-banner.svg" alt="Review Bot — thoughtful pull request reviews, on autopilot" width="100%">
 
-`review_bot.py` is a standalone, single-run script designed to be executed by cron every 60 minutes. It:
+  <p><strong>Your AI reviewer, right where your team works.</strong></p>
+  <p>Automatically review requested pull requests, with repository context and a provider you choose.</p>
+</div>
 
-- Acts under your personal GitHub account via a PAT (`GITHUB_TOKEN`).
-- Searches for open PRs in `GITHUB_ORG` where `GITHUB_USER` is a requested reviewer (`is:open is:pr org:... review-requested:...`), skipping your own PRs.
-- Tracks processed states as `owner/repo#PR:COMMIT_SHA` in `~/reviewed_prs.txt`, so pushed updates / re-requested reviews are re-reviewed automatically. Every review comment also embeds a hidden state marker, so if the state file is deleted or modified the bot checks GitHub for an existing review of that exact commit before posting — no duplicate reviews — and rebuilds the local file as it goes. PRs with new commits are still always re-reviewed.
-- Uses the local clone in `LOCAL_WORKSPACE_PATH`, fetches the PR head, and checks it out into a temporary git worktree under `/tmp/` (guaranteed cleanup via `git worktree remove --force` in a `try/finally`).
-- Reads the diff locally (`git diff origin/main...HEAD`) and cross-references architectural/API files from the sibling repos in the workspace, truncating the combined payload (30,000 characters by default, configurable per provider).
-- Sends the payload to a configurable AI provider — local Ollama by default, or remote providers such as the Cursor API, OpenAI, or Anthropic — and posts the resulting markdown review as a PR comment.
-- Fails gracefully (AI provider outage, missing clone, network drop) so the next cron cycle retries.
+---
 
-## Requirements
+## What it does
+
+Review Bot is a small Python script built to run on a schedule. It finds open pull requests in your GitHub organization that have been assigned to you for review, asks an AI provider to review the changes, and posts the result as a pull request comment.
+
+- **Fits your workflow:** runs as a single process, once per invocation—cron-ready.
+- **Understands the codebase:** checks out each PR into a temporary Git worktree and can add architecture and API context from sibling repositories.
+- **Avoids duplicate reviews:** tracks each PR commit locally and in a hidden marker on GitHub, so new commits are reviewed while already-reviewed commits are skipped.
+- **Choose where AI runs:** use local Ollama by default, or configure a compatible remote provider.
+
+## How a review happens
+
+`Find assigned PRs` → `check out the latest commit` → `collect the diff and project context` → `ask your AI provider` → `post a review comment`
+
+If a provider or network is temporarily unavailable, the run fails gracefully; the next scheduled run can try again.
+
+## Get started
+
+### 1. Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Development
-
-Install dev dependencies, then lint and test:
+Install and start [Ollama](https://ollama.com/) locally, then download the default model:
 
 ```bash
-pip install -r requirements-dev.txt
-ruff check .
-pytest
+ollama pull llama3
 ```
 
-CI runs automatically on every push and pull request via [`.github/workflows/ci.yml`](.github/workflows/ci.yml): ruff linting, provider config validation, a compile check, and the pytest suite across Python 3.9–3.12.
+### 2. Prepare your workspace
 
-## AI Provider Configuration
+Clone this bot and the repositories you want it to review side by side under one workspace directory. The bot uses those sibling clones to find optional architecture, API, schema, contribution, and README context.
 
-The AI backend is pluggable. Each provider has its own JSON config file in the `providers/` directory (override the location with `AI_PROVIDER_CONFIG_DIR`), and the active provider is selected with the `AI_PROVIDER` environment variable (default: `ollama`).
+```text
+workspace/
+└── your-org/
+    ├── review-bot/
+    ├── service-one/
+    └── service-two/
+```
 
-Bundled provider configs:
+### 3. Configure and run
 
-| Provider | Config file | API style | API key env var |
+Set the required environment variables, then run the script:
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_TOKEN` | Personal access token with access to the repositories and permission to read pull requests and post comments. |
+| `GITHUB_USER` | GitHub username the bot acts as. |
+| `GITHUB_ORG` | Organization whose pull requests to check. |
+| `LOCAL_WORKSPACE_PATH` | Parent directory containing your side-by-side repository clones. |
+
+The default provider is local Ollama (`llama3` at `http://localhost:11434`). For example:
+
+```bash
+GITHUB_TOKEN="your-token" \
+GITHUB_USER="your-username" \
+GITHUB_ORG="your-org" \
+LOCAL_WORKSPACE_PATH="$HOME/workspace/your-org" \
+python review_bot.py
+```
+
+## Run it on a schedule
+
+For hourly reviews, add a cron entry. Keep credentials private: use your system's protected environment or secret-management facility rather than committing real values to a file.
+
+```cron
+0 * * * * GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_ORG="your-org" LOCAL_WORKSPACE_PATH="$HOME/workspace/your-org" /usr/bin/python3 $HOME/review-bot/review_bot.py >> $HOME/review-bot/review_bot.log 2>&1
+```
+
+The bot records processed `owner/repo#PR:COMMIT_SHA` states in `~/reviewed_prs.txt`. Each posted comment also contains a hidden state marker, allowing the bot to recover if the local state file is lost. A new commit on a PR is treated as a new review.
+
+## Choose an AI provider
+
+Provider settings live in JSON files in `providers/`. Select one with `AI_PROVIDER` (default: `ollama`); override the config directory with `AI_PROVIDER_CONFIG_DIR`.
+
+| Provider | Config | API style | API key environment variable |
 |---|---|---|---|
-| Ollama (local, default) | `providers/ollama.json` | `ollama` | none |
+| Ollama (local, default) | `providers/ollama.json` | `ollama` | — |
 | OpenAI | `providers/openai.json` | `openai` | `OPENAI_API_KEY` |
 | Cursor API | `providers/cursor.json` | `openai` | `CURSOR_API_KEY` |
 | Anthropic | `providers/anthropic.json` | `anthropic` | `ANTHROPIC_API_KEY` |
 
-Config file schema:
+For example, use Cursor by setting `AI_PROVIDER=cursor` and providing `CURSOR_API_KEY`. The provider configs are templates for endpoint and model settings; **API keys belong in environment variables, never in config files.**
+
+OpenAI-compatible endpoints—including Azure OpenAI gateways, OpenRouter, vLLM, and LM Studio—can use the `openai` API style. Add a provider by adding a `<name>.json` config and setting `AI_PROVIDER=<name>`.
+
+Provider configs support these fields:
 
 ```json
 {
@@ -57,23 +109,18 @@ Config file schema:
 }
 ```
 
-- **API keys are never stored in config files.** `api_key_env` names the environment variable that holds the secret, which you inject via the crontab line.
-- `api_style: "openai"` works with any OpenAI-compatible chat-completions endpoint (Cursor, Azure OpenAI gateways, OpenRouter, vLLM, LM Studio, ...) — just point `base_url` at it. Add new providers by dropping a new `<name>.json` file into `providers/` and setting `AI_PROVIDER=<name>`.
-- `max_payload_chars` lets larger-context remote models receive more diff/context than the 30,000-character default used for local models.
-- The `ollama` provider still honors the legacy `OLLAMA_URL` / `OLLAMA_MODEL` environment overrides.
+`max_payload_chars` limits the combined diff and context sent to the model. The Ollama provider also supports the legacy `OLLAMA_URL` and `OLLAMA_MODEL` environment overrides.
 
-## Production Cron Configuration
+> **Privacy note:** a review sends the PR diff and selected repository context to the configured AI provider. Choose a provider and settings that meet your organization's data-handling requirements.
 
-Local Ollama (default):
+## Development
 
-```cron
-# Automated local PR review bot — runs on the hour, every hour.
-0 * * * * GITHUB_TOKEN="ghp_your_pat_here" GITHUB_USER="your-github-username" GITHUB_ORG="your-org-name" LOCAL_WORKSPACE_PATH="$HOME/workspace/your-org-name" AI_PROVIDER="ollama" OLLAMA_URL="http://localhost:11434" OLLAMA_MODEL="llama3" /usr/bin/python3 $HOME/review-bot/review_bot.py >> $HOME/review-bot/review_bot.log 2>&1
+Install development dependencies, then run the linter and test suite:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
 ```
 
-Remote provider (e.g. Cursor API):
-
-```cron
-# Automated PR review bot using the Cursor API — runs on the hour, every hour.
-0 * * * * GITHUB_TOKEN="ghp_your_pat_here" GITHUB_USER="your-github-username" GITHUB_ORG="your-org-name" LOCAL_WORKSPACE_PATH="$HOME/workspace/your-org-name" AI_PROVIDER="cursor" CURSOR_API_KEY="your_cursor_api_key" /usr/bin/python3 $HOME/review-bot/review_bot.py >> $HOME/review-bot/review_bot.log 2>&1
-```
+CI runs on pushes and pull requests, validating provider configs, compiling the script, and running lint and tests across Python 3.9–3.12. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
