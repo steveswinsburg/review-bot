@@ -1,0 +1,9 @@
+{
+  "api_style": "openai",
+  "base_url": "https://api.openai.com/v1",
+  "model": "gpt-4o",
+  "api_key_env": "OPENAI_API_KEY",
+  "max_payload_chars": 100000,
+  "timeout_seconds": 300,
+  "max_tokens": 4096
+}
