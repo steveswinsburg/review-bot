@@ -112,9 +112,24 @@ log = logging.getLogger("review-bot")
 # State management
 # ---------------------------------------------------------------------------
 
+# Hidden, machine-readable marker embedded in every review comment the bot
+# posts. It makes GitHub itself a durable backup of the reviewed state, so a
+# deleted or corrupted local state file never causes duplicate reviews.
+STATE_MARKER_PREFIX = "<!-- review-bot:state:"
+STATE_MARKER_SUFFIX = " -->"
+
+
+def state_marker(state_key: str) -> str:
+    """Return the hidden HTML comment marker for a reviewed state key."""
+    return f"{STATE_MARKER_PREFIX}{state_key}{STATE_MARKER_SUFFIX}"
+
+
 def load_reviewed_states() -> set:
     """Read previously processed "owner/repo#PR:SHA" states from disk."""
     if not STATE_FILE.exists():
+        log.warning("State file %s not found (first run, or it was "
+                    "deleted); falling back to GitHub comment markers for "
+                    "deduplication.", STATE_FILE)
         return set()
     try:
         return {
@@ -134,6 +149,28 @@ def mark_state_reviewed(state_key: str) -> None:
             handle.write(state_key + "\n")
     except OSError as exc:
         log.error("Could not update state file %s: %s", STATE_FILE, exc)
+
+
+def already_reviewed_on_github(pr, state_key: str) -> bool:
+    """Check GitHub for a prior review of this exact PR+commit state.
+
+    Durable fallback for when the local state file was deleted, modified,
+    or lost: every review comment the bot posts embeds a hidden state
+    marker, so scanning the PR's comments authored by the bot account tells
+    us whether this commit SHA was already reviewed.
+    """
+    marker = state_marker(state_key)
+    try:
+        for comment in pr.get_issue_comments():
+            if (comment.user and comment.user.login == GITHUB_USER
+                    and marker in (comment.body or "")):
+                return True
+    except GithubException as exc:
+        # Fail open towards "not reviewed": a duplicate review is safer
+        # than silently skipping a requested one.
+        log.warning("Could not scan existing comments for %s: %s",
+                    state_key, exc)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +490,7 @@ def review_pr(pr, repo_full_name: str, provider: AIProvider) -> bool:
             return False
 
         comment = (
+            f"{state_marker(f'{repo_full_name}#{pr.number}:{head_sha}')}\n"
             f"## 🤖 Automated Code Review (commit `{head_sha[:12]}`)\n\n"
             f"{review_text}"
         )
@@ -576,6 +614,16 @@ def main() -> int:
 
         if state_key in reviewed_states:
             log.info("Already reviewed %s; skipping.", state_key)
+            continue
+
+        # Durable fallback: if the local state file was deleted or modified,
+        # the hidden marker in previously posted review comments still tells
+        # us this exact PR+commit was already reviewed. Self-heal the file.
+        if already_reviewed_on_github(pr, state_key):
+            log.info("Found existing review comment for %s on GitHub; "
+                     "restoring state and skipping.", state_key)
+            mark_state_reviewed(state_key)
+            reviewed_states.add(state_key)
             continue
 
         log.info("Reviewing %s ...", state_key)

@@ -5,7 +5,7 @@ A bot that does PR reviews.
 
 - Acts under your personal GitHub account via a PAT (`GITHUB_TOKEN`).
 - Searches for open PRs in `GITHUB_ORG` where `GITHUB_USER` is a requested reviewer (`is:open is:pr org:... review-requested:...`), skipping your own PRs.
-- Tracks processed states as `owner/repo#PR:COMMIT_SHA` in `~/reviewed_prs.txt`, so pushed updates / re-requested reviews are re-reviewed automatically.
+- Tracks processed states as `owner/repo#PR:COMMIT_SHA` in `~/reviewed_prs.txt`, so pushed updates / re-requested reviews are re-reviewed automatically. Every review comment also embeds a hidden state marker, so if the state file is deleted or modified the bot checks GitHub for an existing review of that exact commit before posting — no duplicate reviews — and rebuilds the local file as it goes. PRs with new commits are still always re-reviewed.
 - Uses the local clone in `LOCAL_WORKSPACE_PATH`, fetches the PR head, and checks it out into a temporary git worktree under `/tmp/` (guaranteed cleanup via `git worktree remove --force` in a `try/finally`).
 - Reads the diff locally (`git diff origin/main...HEAD`) and cross-references architectural/API files from the sibling repos in the workspace, truncating the combined payload (30,000 characters by default, configurable per provider).
 - Sends the payload to a configurable AI provider — local Ollama by default, or remote providers such as the Cursor API, OpenAI, or Anthropic — and posts the resulting markdown review as a PR comment.
