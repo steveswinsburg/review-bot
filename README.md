@@ -26,8 +26,18 @@ If a provider or network is temporarily unavailable, the run fails gracefully; t
 
 ### 1. Install
 
+Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/) if it
+is not already available, then sync the runtime dependencies declared in
+`pyproject.toml`. This creates the `.venv` environment:
+
 ```bash
-pip install -r requirements.txt
+uv sync
+```
+
+Run the bot with the environment managed by uv:
+
+```bash
+uv run python review_bot.py
 ```
 
 Install and start [Ollama](https://ollama.com/) locally, then download the default model:
@@ -84,7 +94,7 @@ GITHUB_TOKEN="your-token" \
 GITHUB_USER="your-username" \
 GITHUB_ORG="your-org" \
 LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
-python review_bot.py
+uv run python review_bot.py
 ```
 
 For repositories owned by a personal account, use `GITHUB_OWNER` with the
@@ -95,7 +105,7 @@ GITHUB_TOKEN="your-token" \
 GITHUB_USER="your-username" \
 GITHUB_OWNER="your-username" \
 LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
-python review_bot.py
+uv run python review_bot.py
 ```
 
 For a remote provider, set its selector and API key as well. For example:
@@ -107,15 +117,21 @@ GITHUB_OWNER="your-org" \
 LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
 AI_PROVIDER="openai" \
 OPENAI_API_KEY="your-openai-api-key" \
-python review_bot.py
+uv run python review_bot.py
 ```
 
 ## Run it on a schedule
 
 For hourly reviews, add a cron entry. Keep credentials private: use your system's protected environment or secret-management facility rather than committing real values to a file.
 
+The `--locked` flag in this cron command (and in CI) makes uv use the committed
+`uv.lock` exactly. If the lockfile and `pyproject.toml` are out of sync, uv
+fails instead of silently changing dependency versions. For normal local setup
+and development, omit `--locked` so uv can update the lockfile when dependencies
+change.
+
 ```cron
-0 * * * * GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_OWNER="your-org" LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" /usr/bin/python3 $HOME/review-bot/review_bot.py >> $HOME/review-bot/review_bot.log 2>&1
+0 * * * * cd "$HOME/review-bot" && GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_OWNER="your-org" LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" uv run --locked python review_bot.py >> "$HOME/review-bot/review_bot.log" 2>&1
 ```
 
 The bot records processed `owner/repo#PR:COMMIT_SHA` states in `~/reviewed_prs.txt`. Each posted comment also contains a hidden state marker, allowing the bot to recover if the local state file is lost. A new commit on a PR is treated as a new review.
@@ -165,12 +181,13 @@ Provider configs support these fields:
 
 ## Development
 
-Install development dependencies, then run the linter and test suite:
+Development dependencies are declared in the `dev` group in `pyproject.toml`.
+Sync them and run the linter and tests with uv:
 
 ```bash
-pip install -r requirements-dev.txt
-ruff check .
-pytest
+uv sync --group dev
+uv run ruff check .
+uv run pytest
 ```
 
 CI runs on pushes and pull requests, validating provider configs, compiling the script, and running lint and tests across Python 3.9–3.12. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
