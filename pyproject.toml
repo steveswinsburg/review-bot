@@ -1,3 +1,22 @@
+[project]
+name = "review-bot"
+version = "0.1.0"
+description = "Automated AI pull request reviewer for GitHub"
+requires-python = ">=3.9"
+dependencies = [
+    "pygithub>=2.5.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+    "pytest>=8.3.0",
+]
+
+[tool.uv]
+package = false
+default-groups = []
+
 [tool.ruff]
 line-length = 100
 target-version = "py39"
