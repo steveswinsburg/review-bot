@@ -14,8 +14,20 @@ A bot that does PR reviews.
 ## Requirements
 
 ```bash
-pip install pygithub
+pip install -r requirements.txt
 ```
+
+## Development
+
+Install dev dependencies, then lint and test:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
+```
+
+CI runs automatically on every push and pull request via [`.github/workflows/ci.yml`](.github/workflows/ci.yml): ruff linting, provider config validation, a compile check, and the pytest suite across Python 3.9–3.12.
 
 ## AI Provider Configuration
 
