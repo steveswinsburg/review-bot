@@ -42,6 +42,7 @@ AI provider configuration:
         openai     OpenAI-compatible /chat/completions endpoint (OpenAI,
                    Cursor, Azure OpenAI gateways, OpenRouter, vLLM, ...).
         anthropic  Anthropic /v1/messages endpoint.
+    It is also possible to create separate provider configs for AI providers that share a pattern, for example cursor.json even though it uses the OpenAI-compatible API style.
     API keys are NEVER stored in the config files; each config names the
     environment variable holding the key via "api_key_env".
 """
