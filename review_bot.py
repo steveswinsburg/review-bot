@@ -7,7 +7,9 @@ under a personal GitHub account via a PAT. It finds open PRs in a target
 organization where the user is a requested reviewer, checks the PR branch out
 into a temporary git worktree inside the locally cloned repository, gathers
 cross-repository architectural context from sibling clones in the workspace,
-sends the combined payload to a locally hosted Ollama instance, and posts the
+sends the combined payload to a configurable AI provider (local Ollama by
+default, or remote providers such as the Cursor API, OpenAI, or Anthropic via
+per-provider config files), and posts the
 resulting review as a PR comment.
 
 Required environment variables:
@@ -18,9 +20,26 @@ Required environment variables:
                           side-by-side (e.g. ~/workspace/org_name/).
 
 Optional environment variables:
-    OLLAMA_URL            Base URL of the Ollama instance
+    AI_PROVIDER           Name of the AI provider config to use (default:
+                          "ollama"). Resolves to providers/<name>.json.
+    AI_PROVIDER_CONFIG_DIR
+                          Directory containing provider config files
+                          (default: providers/ next to this script).
+    OLLAMA_URL            Legacy override for the ollama provider's base URL
                           (default: http://localhost:11434).
-    OLLAMA_MODEL          Model name to use (default: llama3).
+    OLLAMA_MODEL          Legacy override for the ollama provider's model
+                          (default: llama3).
+
+AI provider configuration:
+    Each provider is described by a small JSON file in the config directory,
+    e.g. providers/ollama.json, providers/openai.json, providers/cursor.json,
+    providers/anthropic.json. Supported "api_style" values:
+        ollama     Ollama native /api/generate endpoint (no auth).
+        openai     OpenAI-compatible /chat/completions endpoint (OpenAI,
+                   Cursor, Azure OpenAI gateways, OpenRouter, vLLM, ...).
+        anthropic  Anthropic /v1/messages endpoint.
+    API keys are NEVER stored in the config files; each config names the
+    environment variable holding the key via "api_key_env".
 """
 
 import json
@@ -46,13 +65,20 @@ LOCAL_WORKSPACE_PATH = Path(
     os.path.expanduser(os.environ.get("LOCAL_WORKSPACE_PATH", ""))
 )
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3")
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "ollama")
+AI_PROVIDER_CONFIG_DIR = Path(
+    os.path.expanduser(
+        os.environ.get(
+            "AI_PROVIDER_CONFIG_DIR",
+            str(Path(__file__).resolve().parent / "providers"),
+        )
+    )
+)
 
 STATE_FILE = Path.home() / "reviewed_prs.txt"
 
 # Hard cap on the combined payload (diff + cross-repo context) sent to the
-# local LLM, protecting its context window.
+# LLM, protecting its context window (overridable per provider config).
 MAX_PAYLOAD_CHARS = 30_000
 
 # Filenames that carry systemic / architectural context in sibling repos.
@@ -72,7 +98,7 @@ CONTEXT_FILE_CANDIDATES = (
 )
 
 GIT_TIMEOUT_SECONDS = 120
-OLLAMA_TIMEOUT_SECONDS = 600
+AI_TIMEOUT_SECONDS = 600
 
 logging.basicConfig(
     level=logging.INFO,
@@ -175,8 +201,165 @@ def collect_cross_repo_context(current_repo_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Ollama integration
+# AI provider integration (Ollama, OpenAI-compatible, Anthropic)
 # ---------------------------------------------------------------------------
+
+class AIProviderError(Exception):
+    """Raised when a provider config is invalid or a provider call fails."""
+
+
+class AIProvider:
+    """An AI backend described by a per-provider JSON config file.
+
+    Config schema (providers/<name>.json):
+        {
+          "api_style":   "ollama" | "openai" | "anthropic",   (required)
+          "base_url":    "https://...",                       (required)
+          "model":       "model-name",                        (required)
+          "api_key_env": "ENV_VAR_HOLDING_KEY",               (required for
+                                                               remote styles)
+          "max_payload_chars": 30000,                         (optional)
+          "timeout_seconds":   600,                           (optional)
+          "max_tokens":        4096,                          (optional,
+                                                               openai/anthropic)
+          "extra_headers": {"Header-Name": "value"}           (optional)
+        }
+
+    API keys are never stored in config files; "api_key_env" names the
+    environment variable that holds the secret.
+    """
+
+    SUPPORTED_API_STYLES = ("ollama", "openai", "anthropic")
+
+    def __init__(self, name: str, config: dict):
+        self.name = name
+        self.api_style = config.get("api_style", "")
+        self.base_url = str(config.get("base_url", "")).rstrip("/")
+        self.model = config.get("model", "")
+        self.max_payload_chars = int(
+            config.get("max_payload_chars", MAX_PAYLOAD_CHARS)
+        )
+        self.timeout_seconds = int(
+            config.get("timeout_seconds", AI_TIMEOUT_SECONDS)
+        )
+        self.max_tokens = int(config.get("max_tokens", 4096))
+        self.extra_headers = dict(config.get("extra_headers", {}))
+
+        if self.api_style not in self.SUPPORTED_API_STYLES:
+            raise AIProviderError(
+                f"Provider '{name}': unsupported api_style "
+                f"'{self.api_style}' (expected one of "
+                f"{', '.join(self.SUPPORTED_API_STYLES)})."
+            )
+        if not self.base_url or not self.model:
+            raise AIProviderError(
+                f"Provider '{name}': 'base_url' and 'model' are required."
+            )
+
+        self.api_key = ""
+        api_key_env = config.get("api_key_env", "")
+        if api_key_env:
+            self.api_key = os.environ.get(api_key_env, "")
+        if self.api_style != "ollama" and not self.api_key:
+            raise AIProviderError(
+                f"Provider '{name}': remote api_style '{self.api_style}' "
+                f"requires an API key; set the '{api_key_env or 'api_key_env'}'"
+                " environment variable."
+            )
+
+    # -- request/response shaping per API style ----------------------------
+
+    def _build_request(self, prompt: str):
+        headers = {"Content-Type": "application/json", **self.extra_headers}
+        if self.api_style == "ollama":
+            url = f"{self.base_url}/api/generate"
+            payload = {"model": self.model, "prompt": prompt, "stream": False}
+        elif self.api_style == "openai":
+            url = f"{self.base_url}/chat/completions"
+            headers["Authorization"] = "Bearer " + self.api_key
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": self.max_tokens,
+                "stream": False,
+            }
+        else:  # anthropic
+            url = f"{self.base_url}/v1/messages"
+            headers["x-api-key"] = self.api_key
+            headers.setdefault("anthropic-version", "2023-06-01")
+            payload = {
+                "model": self.model,
+                "max_tokens": self.max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+        return url, headers, payload
+
+    def _parse_response(self, data: dict) -> str:
+        if self.api_style == "ollama":
+            return (data.get("response") or "").strip()
+        if self.api_style == "openai":
+            choices = data.get("choices") or []
+            if choices:
+                message = choices[0].get("message") or {}
+                return (message.get("content") or "").strip()
+            return ""
+        # anthropic
+        parts = data.get("content") or []
+        return "\n".join(
+            part.get("text", "") for part in parts
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+
+    def request_review(self, prompt: str) -> str:
+        """Send the prompt to the configured AI backend and return the text."""
+        url, headers, payload = self._build_request(prompt)
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(
+            request, timeout=self.timeout_seconds
+        ) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return self._parse_response(data)
+
+
+def load_ai_provider(name: str) -> AIProvider:
+    """Load the provider config file providers/<name>.json.
+
+    The built-in 'ollama' provider works without a config file and honors the
+    legacy OLLAMA_URL / OLLAMA_MODEL environment overrides.
+    """
+    config_path = AI_PROVIDER_CONFIG_DIR / f"{name}.json"
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AIProviderError(
+                f"Could not parse provider config {config_path}: {exc}"
+            ) from exc
+        # Allow legacy env overrides for the ollama provider.
+        if name == "ollama":
+            if os.environ.get("OLLAMA_URL"):
+                config["base_url"] = os.environ["OLLAMA_URL"]
+            if os.environ.get("OLLAMA_MODEL"):
+                config["model"] = os.environ["OLLAMA_MODEL"]
+        return AIProvider(name, config)
+
+    if name == "ollama":
+        return AIProvider(name, {
+            "api_style": "ollama",
+            "base_url": os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+            "model": os.environ.get("OLLAMA_MODEL", "llama3"),
+        })
+
+    raise AIProviderError(
+        f"No config file found for AI provider '{name}' "
+        f"(expected {config_path})."
+    )
+
 
 REVIEW_PROMPT_TEMPLATE = """You are an elite Enterprise Software Architect \
 with full visibility into the wider local codebase layout of this organization.
@@ -204,27 +387,11 @@ Output format requirements:
 """
 
 
-def request_ollama_review(prompt: str) -> str:
-    """Send the prompt to the local Ollama instance and return the response."""
-    body = json.dumps(
-        {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        f"{OLLAMA_URL.rstrip('/')}/api/generate",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return (data.get("response") or "").strip()
-
-
 # ---------------------------------------------------------------------------
 # PR review workflow
 # ---------------------------------------------------------------------------
 
-def review_pr(pr, repo_full_name: str) -> bool:
+def review_pr(pr, repo_full_name: str, provider: AIProvider) -> bool:
     """Review a single PR using a temporary git worktree. Returns success."""
     repo_name = repo_full_name.split("/", 1)[1]
     repo_path = LOCAL_WORKSPACE_PATH / repo_name
@@ -268,8 +435,9 @@ def review_pr(pr, repo_full_name: str) -> bool:
             "=== CROSS-REPOSITORY ARCHITECTURAL CONTEXT ===\n"
             f"{cross_repo_context}"
         )
-        if len(payload) > MAX_PAYLOAD_CHARS:
-            payload = payload[:MAX_PAYLOAD_CHARS] + "\n\n[payload truncated]"
+        if len(payload) > provider.max_payload_chars:
+            payload = (payload[:provider.max_payload_chars]
+                       + "\n\n[payload truncated]")
 
         prompt = REVIEW_PROMPT_TEMPLATE.format(
             repo_full_name=repo_full_name,
@@ -278,10 +446,10 @@ def review_pr(pr, repo_full_name: str) -> bool:
             payload=payload,
         )
 
-        review_text = request_ollama_review(prompt)
+        review_text = provider.request_review(prompt)
         if not review_text:
-            log.error("Ollama returned an empty review for %s#%d.",
-                      repo_full_name, pr.number)
+            log.error("AI provider '%s' returned an empty review for %s#%d.",
+                      provider.name, repo_full_name, pr.number)
             return False
 
         comment = (
@@ -301,8 +469,9 @@ def review_pr(pr, repo_full_name: str) -> bool:
                   repo_full_name, pr.number, exc, exc.stderr)
         return False
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        log.error("Ollama unavailable or returned bad data for %s#%d: %s. "
-                  "Will retry next cron cycle.", repo_full_name, pr.number, exc)
+        log.error("AI provider '%s' unavailable or returned bad data for "
+                  "%s#%d: %s. Will retry next cron cycle.",
+                  provider.name, repo_full_name, pr.number, exc)
         return False
     except GithubException as exc:
         log.error("GitHub API error while reviewing %s#%d: %s",
@@ -359,6 +528,14 @@ def main() -> int:
     reviewed_states = load_reviewed_states()
 
     try:
+        provider = load_ai_provider(AI_PROVIDER)
+    except AIProviderError as exc:
+        log.error("AI provider configuration error: %s", exc)
+        return 1
+    log.info("Using AI provider '%s' (api_style=%s, model=%s).",
+             provider.name, provider.api_style, provider.model)
+
+    try:
         gh = Github(GITHUB_TOKEN)
         query = (
             f"is:open is:pr org:{GITHUB_ORG} "
@@ -402,7 +579,7 @@ def main() -> int:
             continue
 
         log.info("Reviewing %s ...", state_key)
-        if review_pr(pr, repo_full_name):
+        if review_pr(pr, repo_full_name, provider):
             mark_state_reviewed(state_key)
             reviewed_states.add(state_key)
         else:

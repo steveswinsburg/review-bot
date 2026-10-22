@@ -1,0 +1,7 @@
+{
+  "api_style": "ollama",
+  "base_url": "http://localhost:11434",
+  "model": "llama3",
+  "max_payload_chars": 30000,
+  "timeout_seconds": 600
+}
