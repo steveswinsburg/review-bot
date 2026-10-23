@@ -48,16 +48,25 @@ ollama pull llama3
 
 ### 2. Prepare your workspace
 
-Clone each repository you want the bot to review directly inside a workspace
-directory. The directory name and location are up to you; it does not need to
-match the GitHub organization name. Each clone must be named after its GitHub
-repository, because the bot looks for it at
-`LOCAL_WORKSPACE_PATH/<repository-name>`. The bot also reads optional
-architecture, API, schema, contribution, and README context from other
-repository clones in that directory.
+The workspace layout depends on the GitHub owner type:
+
+- **Organization:** Set `WORKSPACE_PATH` to a parent directory containing
+  the repository clones you want reviewed, each directly inside it. Those
+  clones define the review scope; PRs for other repositories in the
+  organization are ignored. The bot can use optional architecture, API,
+  schema, contribution, and README context from the other clones in that
+  workspace, so include only projects whose context should be shared.
+- **Personal account:** Set `WORKSPACE_PATH` to the checkout directory
+  of the single repository you want reviewed. Only that repository is eligible,
+  and the bot does not add context from other repositories.
+
+Directory names and locations are up to you; organization workspace paths do
+not need to match the GitHub organization name. For organization checkouts,
+each clone must be named after its GitHub repository because the bot looks for
+it at `WORKSPACE_PATH/<repository-name>`.
 
 ```text
-~/code/review-workspace/       # LOCAL_WORKSPACE_PATH
+~/code/review-workspace/       # WORKSPACE_PATH
 ├── service-one/               # clone of your-org/service-one
 └── service-two/               # clone of your-org/service-two
 ```
@@ -77,7 +86,7 @@ needed. The token must be able to access the target repositories, and
 | `GITHUB_USER` | Required. GitHub username the token belongs to and the username assigned as reviewer. | `GITHUB_USER="octocat"` |
 | `GITHUB_OWNER` | Required if `GITHUB_ORG` is not set. Organization or personal-account login whose open PRs are searched; account type is detected automatically. | `GITHUB_OWNER="octocat"` or `GITHUB_OWNER="your-org"` |
 | `GITHUB_ORG` | Required if `GITHUB_OWNER` is not set. Organization login whose open PRs are searched. | `GITHUB_ORG="your-org"` |
-| `LOCAL_WORKSPACE_PATH` | Required. Existing directory containing local clones of the repositories to review, each directly inside it. | `LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace"` |
+| `WORKSPACE_PATH` | Required. For an organization, parent directory containing the selected repository clones. For a personal account, the checkout directory of the one repository to review. | `WORKSPACE_PATH="$HOME/code/review-workspace"` or `WORKSPACE_PATH="$HOME/code/my-repo"` |
 | `AI_PROVIDER` | Optional; defaults to `ollama`. Selects a provider config such as `ollama`, `openai`, `cursor`, or `anthropic`. | `AI_PROVIDER="openai"` |
 | `AI_PROVIDER_CONFIG_DIR` | Optional; defaults to this project's `providers/` directory. Directory containing `<AI_PROVIDER>.json`. | `AI_PROVIDER_CONFIG_DIR="$HOME/review-bot/providers"` |
 | `OLLAMA_URL` | Optional; defaults to `http://localhost:11434`. Overrides the Ollama endpoint. | `OLLAMA_URL="http://localhost:11434"` |
@@ -93,18 +102,19 @@ For an organization, you can use either configuration:
 GITHUB_TOKEN="your-token" \
 GITHUB_USER="your-username" \
 GITHUB_ORG="your-org" \
-LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
+WORKSPACE_PATH="$HOME/code/review-workspace" \
 uv run python review_bot.py
 ```
 
 For repositories owned by a personal account, use `GITHUB_OWNER` with the
-account's login:
+account's login and point `WORKSPACE_PATH` directly at the one checkout
+to review. Sibling repositories are not used as context:
 
 ```bash
 GITHUB_TOKEN="your-token" \
 GITHUB_USER="your-username" \
 GITHUB_OWNER="your-username" \
-LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
+WORKSPACE_PATH="$HOME/code/my-repo" \
 uv run python review_bot.py
 ```
 
@@ -114,7 +124,7 @@ GITHUB_TOKEN="your-token" \
 GITHUB_USER="your-username" \
 GITHUB_ORG="your-org" \
 OLLAMA_MODEL="llama3" \
-LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
+WORKSPACE_PATH="$HOME/code/review-workspace" \
 uv run python review_bot.py
 ```
 
@@ -124,7 +134,7 @@ For a remote provider, set its selector and API key as well. For example:
 GITHUB_TOKEN="your-token" \
 GITHUB_USER="your-username" \
 GITHUB_OWNER="your-org" \
-LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" \
+WORKSPACE_PATH="$HOME/code/review-workspace" \
 AI_PROVIDER="openai" \
 OPENAI_API_KEY="your-openai-api-key" \
 uv run python review_bot.py
@@ -141,7 +151,7 @@ and development, omit `--locked` so uv can update the lockfile when dependencies
 change.
 
 ```cron
-0 * * * * cd "$HOME/review-bot" && GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_OWNER="your-org" LOCAL_WORKSPACE_PATH="$HOME/code/review-workspace" uv run --locked python review_bot.py >> "$HOME/review-bot/review_bot.log" 2>&1
+0 * * * * cd "$HOME/review-bot" && GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_OWNER="your-org" WORKSPACE_PATH="$HOME/code/review-workspace" uv run --locked python review_bot.py >> "$HOME/review-bot/review_bot.log" 2>&1
 ```
 
 The bot records processed `owner/repo#PR:COMMIT_SHA` states in `~/reviewed_prs.txt`. Each posted comment also contains a hidden state marker, allowing the bot to recover if the local state file is lost. A new commit on a PR is treated as a new review.

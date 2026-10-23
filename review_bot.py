@@ -17,8 +17,9 @@ Required environment variables:
     GITHUB_USER           The GitHub username the bot acts as.
     GITHUB_OWNER or
     GITHUB_ORG             The owner to scan (see configuration notes below).
-    LOCAL_WORKSPACE_PATH  Parent directory containing repository clones
-                          side-by-side.
+    WORKSPACE_PATH       Parent directory containing repository clones
+                          side-by-side for organization owners, or a single
+                          repository checkout for personal-account owners.
 
 Set either GITHUB_OWNER to automatically detect an organization or personal
 account, or GITHUB_ORG when the owner is known to be an organization.
@@ -68,8 +69,8 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_USER = os.environ.get("GITHUB_USER", "")
 GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "")
 GITHUB_ORG = os.environ.get("GITHUB_ORG", "")
-LOCAL_WORKSPACE_PATH = Path(
-    os.path.expanduser(os.environ.get("LOCAL_WORKSPACE_PATH", ""))
+WORKSPACE_PATH = Path(
+    os.path.expanduser(os.environ.get("WORKSPACE_PATH", ""))
 )
 
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "ollama")
@@ -211,20 +212,45 @@ def detect_base_branch(repo_path: Path) -> str:
     return "main"
 
 
+def list_workspace_repositories() -> list[Path]:
+    """Return Git repositories checked out directly inside the workspace."""
+    return sorted(
+        path for path in WORKSPACE_PATH.iterdir()
+        if path.is_dir() and (path / ".git").exists()
+    )
+
+
+def get_repositories_to_review(is_organization: bool) -> list[Path]:
+    """Resolve review scope from an organization workspace or personal checkout."""
+    if is_organization:
+        return list_workspace_repositories()
+    if (WORKSPACE_PATH / ".git").exists():
+        return [WORKSPACE_PATH]
+    raise ValueError(
+        "For a personal GitHub account, WORKSPACE_PATH must point "
+        "directly to the repository checkout to review."
+    )
+
+
+def is_workspace_repository(repository_name: str, workspace_repo_names: set[str]) -> bool:
+    """Check whether a repository is included in the configured review scope."""
+    return repository_name in workspace_repo_names
+
+
 def collect_cross_repo_context(current_repo_name: str) -> str:
     """Gather architectural/API context from the *other* local repo clones.
 
     Reads well-known architectural files from the default branch working
-    trees of sibling repositories inside LOCAL_WORKSPACE_PATH.
+    trees of sibling repositories inside WORKSPACE_PATH.
     """
     sections = []
     try:
-        siblings = sorted(
-            p for p in LOCAL_WORKSPACE_PATH.iterdir()
-            if p.is_dir() and (p / ".git").exists() and p.name != current_repo_name
-        )
+        siblings = [
+            path for path in list_workspace_repositories()
+            if path.name != current_repo_name
+        ]
     except OSError as exc:
-        log.warning("Could not list workspace %s: %s", LOCAL_WORKSPACE_PATH, exc)
+        log.warning("Could not list workspace %s: %s", WORKSPACE_PATH, exc)
         return ""
 
     for sibling in siblings:
@@ -452,10 +478,18 @@ Output format requirements:
 # PR review workflow
 # ---------------------------------------------------------------------------
 
-def review_pr(pr, repo_full_name: str, provider: AIProvider) -> bool:
+def review_pr(
+    pr,
+    repo_full_name: str,
+    provider: AIProvider,
+    is_organization: bool = True,
+) -> bool:
     """Review a single PR using a temporary git worktree. Returns success."""
     repo_name = repo_full_name.split("/", 1)[1]
-    repo_path = LOCAL_WORKSPACE_PATH / repo_name
+    repo_path = (
+        WORKSPACE_PATH / repo_name
+        if is_organization else WORKSPACE_PATH
+    )
 
     if not (repo_path / ".git").exists():
         log.error("Local clone missing for %s (expected at %s); skipping.",
@@ -488,7 +522,9 @@ def review_pr(pr, repo_full_name: str, provider: AIProvider) -> bool:
             return True
 
         # Cross-reference neighboring repositories for systemic context.
-        cross_repo_context = collect_cross_repo_context(repo_name)
+        cross_repo_context = (
+            collect_cross_repo_context(repo_name) if is_organization else ""
+        )
 
         payload = (
             "=== PR DIFF (git diff origin/"
@@ -576,7 +612,7 @@ def main() -> int:
             ("GITHUB_TOKEN", GITHUB_TOKEN),
             ("GITHUB_USER", GITHUB_USER),
             ("GITHUB_OWNER or GITHUB_ORG", owner),
-            ("LOCAL_WORKSPACE_PATH", str(LOCAL_WORKSPACE_PATH)),
+            ("WORKSPACE_PATH", str(WORKSPACE_PATH)),
         ) if not value or value == "."
     ]
     if missing:
@@ -584,10 +620,39 @@ def main() -> int:
                   ", ".join(missing))
         return 1
 
-    if not LOCAL_WORKSPACE_PATH.is_dir():
-        log.error("LOCAL_WORKSPACE_PATH does not exist: %s",
-                  LOCAL_WORKSPACE_PATH)
+    if not WORKSPACE_PATH.is_dir():
+        log.error("WORKSPACE_PATH does not exist: %s", WORKSPACE_PATH)
         return 1
+
+    try:
+        gh = Github(GITHUB_TOKEN)
+        qualifier = owner_search_qualifier(gh, owner, force_organization)
+    except GithubException as exc:
+        log.error("Could not determine GitHub owner type: %s", exc)
+        return 1
+    except ValueError as exc:
+        log.error("Could not determine GitHub owner type: %s", exc)
+        return 1
+    except Exception as exc:  # network drop, DNS failure, etc.
+        log.error("Unexpected error reaching GitHub (will retry next "
+                  "cycle): %s", exc)
+        return 1
+
+    try:
+        workspace_repositories = get_repositories_to_review(
+            is_organization=qualifier == "org"
+        )
+    except OSError as exc:
+        log.error("Could not list workspace %s: %s", WORKSPACE_PATH, exc)
+        return 1
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 1
+    workspace_repo_names = {path.name for path in workspace_repositories}
+    if not workspace_repo_names:
+        log.info("No Git repository clones found in %s; nothing to review.",
+                 WORKSPACE_PATH)
+        return 0
 
     reviewed_states = load_reviewed_states()
 
@@ -600,8 +665,6 @@ def main() -> int:
              provider.name, provider.api_style, provider.model)
 
     try:
-        gh = Github(GITHUB_TOKEN)
-        qualifier = owner_search_qualifier(gh, owner, force_organization)
         query = (
             f"is:open is:pr {qualifier}:{owner} "
             f"review-requested:{GITHUB_USER}"
@@ -610,23 +673,26 @@ def main() -> int:
     except GithubException as exc:
         log.error("GitHub search failed (will retry next cycle): %s", exc)
         return 1
-    except ValueError as exc:
-        log.error("Could not determine GitHub owner type: %s", exc)
-        return 1
     except Exception as exc:  # network drop, DNS failure, etc.
         log.error("Unexpected error reaching GitHub (will retry next "
                   "cycle): %s", exc)
         return 1
 
-    log.info("Found %d open PR(s) requesting review from %s under %s %s.",
-             len(issues), GITHUB_USER, "organization" if qualifier == "org"
-             else "user", owner)
+    log.info(
+        "Found %d open PR(s) requesting review from %s under %s %s; "
+        "limiting reviews to %d checked-out repository/repositories.",
+        len(issues), GITHUB_USER, "organization" if qualifier == "org"
+        else "user", owner, len(workspace_repo_names),
+    )
 
     failures = 0
     for issue in issues:
         try:
-            repo_full_name = issue.repository.full_name
-            pr = issue.repository.get_pull(issue.number)
+            repository = issue.repository
+            if not is_workspace_repository(repository.name, workspace_repo_names):
+                continue
+            repo_full_name = repository.full_name
+            pr = repository.get_pull(issue.number)
         except GithubException as exc:
             log.error("Could not load PR for issue %s: %s", issue, exc)
             failures += 1
@@ -658,7 +724,9 @@ def main() -> int:
             continue
 
         log.info("Reviewing %s ...", state_key)
-        if review_pr(pr, repo_full_name, provider):
+        if review_pr(
+            pr, repo_full_name, provider, is_organization=qualifier == "org"
+        ):
             mark_state_reviewed(state_key)
             reviewed_states.add(state_key)
         else:
