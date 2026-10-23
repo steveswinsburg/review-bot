@@ -18,8 +18,8 @@ Required environment variables:
     GITHUB_OWNER or
     GITHUB_ORG             The owner to scan (see configuration notes below).
     WORKSPACE_PATH       Parent directory containing repository clones
-                          side-by-side for organization owners, or a single
-                          repository checkout for personal-account owners.
+                          side-by-side, or a single repository checkout.
+                          Both layouts work for organizations and users.
 
 Set either GITHUB_OWNER to automatically detect an organization or personal
 account, or GITHUB_ORG when the owner is known to be an organization.
@@ -213,22 +213,12 @@ def detect_base_branch(repo_path: Path) -> str:
 
 
 def list_workspace_repositories() -> list[Path]:
-    """Return Git repositories checked out directly inside the workspace."""
+    """Return the workspace checkout itself, or its direct child Git clones."""
+    if (WORKSPACE_PATH / ".git").exists():
+        return [WORKSPACE_PATH]
     return sorted(
         path for path in WORKSPACE_PATH.iterdir()
         if path.is_dir() and (path / ".git").exists()
-    )
-
-
-def get_repositories_to_review(is_organization: bool) -> list[Path]:
-    """Resolve review scope from an organization workspace or personal checkout."""
-    if is_organization:
-        return list_workspace_repositories()
-    if (WORKSPACE_PATH / ".git").exists():
-        return [WORKSPACE_PATH]
-    raise ValueError(
-        "For a personal GitHub account, WORKSPACE_PATH must point "
-        "directly to the repository checkout to review."
     )
 
 
@@ -478,17 +468,12 @@ Output format requirements:
 # PR review workflow
 # ---------------------------------------------------------------------------
 
-def review_pr(
-    pr,
-    repo_full_name: str,
-    provider: AIProvider,
-    is_organization: bool = True,
-) -> bool:
+def review_pr(pr, repo_full_name: str, provider: AIProvider) -> bool:
     """Review a single PR using a temporary git worktree. Returns success."""
     repo_name = repo_full_name.split("/", 1)[1]
     repo_path = (
-        WORKSPACE_PATH / repo_name
-        if is_organization else WORKSPACE_PATH
+        WORKSPACE_PATH if (WORKSPACE_PATH / ".git").exists()
+        else WORKSPACE_PATH / repo_name
     )
 
     if not (repo_path / ".git").exists():
@@ -522,9 +507,7 @@ def review_pr(
             return True
 
         # Cross-reference neighboring repositories for systemic context.
-        cross_repo_context = (
-            collect_cross_repo_context(repo_name) if is_organization else ""
-        )
+        cross_repo_context = collect_cross_repo_context(repo_name)
 
         payload = (
             "=== PR DIFF (git diff origin/"
@@ -639,14 +622,9 @@ def main() -> int:
         return 1
 
     try:
-        workspace_repositories = get_repositories_to_review(
-            is_organization=qualifier == "org"
-        )
+        workspace_repositories = list_workspace_repositories()
     except OSError as exc:
         log.error("Could not list workspace %s: %s", WORKSPACE_PATH, exc)
-        return 1
-    except ValueError as exc:
-        log.error("%s", exc)
         return 1
     workspace_repo_names = {path.name for path in workspace_repositories}
     if not workspace_repo_names:
@@ -724,9 +702,7 @@ def main() -> int:
             continue
 
         log.info("Reviewing %s ...", state_key)
-        if review_pr(
-            pr, repo_full_name, provider, is_organization=qualifier == "org"
-        ):
+        if review_pr(pr, repo_full_name, provider):
             mark_state_reviewed(state_key)
             reviewed_states.add(state_key)
         else:

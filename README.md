@@ -48,22 +48,26 @@ ollama pull llama3
 
 ### 2. Prepare your workspace
 
-The workspace layout depends on the GitHub owner type:
+The workspace layout determines review scope, for both organizations and
+personal accounts:
 
-- **Organization:** Set `WORKSPACE_PATH` to a parent directory containing
-  the repository clones you want reviewed, each directly inside it. Those
-  clones define the review scope; PRs for other repositories in the
-  organization are ignored. The bot can use optional architecture, API,
-  schema, contribution, and README context from the other clones in that
-  workspace, so include only projects whose context should be shared.
-- **Personal account:** Set `WORKSPACE_PATH` to the checkout directory
-  of the single repository you want reviewed. Only that repository is eligible,
-  and the bot does not add context from other repositories.
+- **Single repository:** If `WORKSPACE_PATH` contains a `.git` directory or
+  file, only that checkout is eligible for review. Sibling and nested
+  repositories are not used for context.
+- **Multiple repositories:** Otherwise, the bot selects Git clones directly
+  inside `WORKSPACE_PATH`. Only those repositories are eligible for review,
+  and the bot can use optional architecture, API, schema, contribution, and
+  README context from the other selected clones. Nested repositories and
+  non-Git directories are ignored.
+- **No repositories:** The bot logs that there is nothing to review and exits
+  successfully.
 
-Directory names and locations are up to you; organization workspace paths do
-not need to match the GitHub organization name. For organization checkouts,
-each clone must be named after its GitHub repository because the bot looks for
-it at `WORKSPACE_PATH/<repository-name>`.
+Put related projects together and keep unrelated projects in separate
+workspaces to avoid sharing unrelated context. Directory locations are up to
+you; the workspace path does not need to match the GitHub owner name. Name
+each checkout after its GitHub repository so the bot can match PRs to clones.
+`GITHUB_OWNER`/`GITHUB_ORG` only determines whose PRs are searched; PRs outside
+the selected workspace repositories are ignored.
 
 ```text
 ~/code/review-workspace/       # WORKSPACE_PATH
@@ -86,7 +90,7 @@ needed. The token must be able to access the target repositories, and
 | `GITHUB_USER` | Required. GitHub username the token belongs to and the username assigned as reviewer. | `GITHUB_USER="octocat"` |
 | `GITHUB_OWNER` | Required if `GITHUB_ORG` is not set. Organization or personal-account login whose open PRs are searched; account type is detected automatically. | `GITHUB_OWNER="octocat"` or `GITHUB_OWNER="your-org"` |
 | `GITHUB_ORG` | Required if `GITHUB_OWNER` is not set. Organization login whose open PRs are searched. | `GITHUB_ORG="your-org"` |
-| `WORKSPACE_PATH` | Required. For an organization, parent directory containing the selected repository clones. For a personal account, the checkout directory of the one repository to review. | `WORKSPACE_PATH="$HOME/code/review-workspace"` or `WORKSPACE_PATH="$HOME/code/my-repo"` |
+| `WORKSPACE_PATH` | Required. A single Git checkout or a parent directory containing selected Git clones. Both layouts work with an organization or personal account. | `WORKSPACE_PATH="$HOME/code/review-workspace"` or `WORKSPACE_PATH="$HOME/code/my-repo"` |
 | `AI_PROVIDER` | Optional; defaults to `ollama`. Selects a provider config such as `ollama`, `openai`, `cursor`, or `anthropic`. | `AI_PROVIDER="openai"` |
 | `AI_PROVIDER_CONFIG_DIR` | Optional; defaults to this project's `providers/` directory. Directory containing `<AI_PROVIDER>.json`. | `AI_PROVIDER_CONFIG_DIR="$HOME/review-bot/providers"` |
 | `OLLAMA_URL` | Optional; defaults to `http://localhost:11434`. Overrides the Ollama endpoint. | `OLLAMA_URL="http://localhost:11434"` |
@@ -107,8 +111,10 @@ uv run python review_bot.py
 ```
 
 For repositories owned by a personal account, use `GITHUB_OWNER` with the
-account's login and point `WORKSPACE_PATH` directly at the one checkout
-to review. Sibling repositories are not used as context:
+account's login. This example selects one checkout without cross-repository
+context; set `WORKSPACE_PATH="$HOME/code/review-workspace"` instead to review
+multiple related clones and share context between them. Organizations can also
+use the single-checkout layout:
 
 ```bash
 GITHUB_TOKEN="your-token" \
