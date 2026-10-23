@@ -702,9 +702,9 @@ def main() -> int:
 
         # Guard clause: never review my own PRs (prevents self-review loops).
         if pr.user.login == GITHUB_USER:
+            log.info("Skipping own PR %s#%d (authored by %s).",
+                     repo_full_name, pr.number, GITHUB_USER)
             if state_key not in reviewed_states:
-                log.info("Skipping own PR %s#%d (authored by %s).",
-                         repo_full_name, pr.number, GITHUB_USER)
                 mark_state_reviewed(state_key)
                 reviewed_states.add(state_key)
             continue
