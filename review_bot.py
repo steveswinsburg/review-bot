@@ -459,6 +459,12 @@ Output format requirements:
 (e.g. **Cross-Repo Impact**, **Bugs & Risks**, **Suggestions**).
 - Be practical and specific; reference file names and line context where possible.
 - If everything looks good, say so briefly rather than inventing issues.
+- This review is posted as a one-way GitHub comment. The author cannot reply \
+to you, and you cannot implement follow-up changes.
+- Do not ask questions, request confirmation, or offer to do more work.
+- Do not end with invitations or closings such as "if you like", "let me know", \
+"happy to", "I can also", "we can", or "would you like".
+- State findings and concrete recommended changes directly, then stop.
 
 {payload}
 """
