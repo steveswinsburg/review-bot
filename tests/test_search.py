@@ -38,3 +38,12 @@ def test_owner_search_qualifier_rejects_unknown_account_type():
 
     with pytest.raises(ValueError, match="unsupported account type"):
         rb.owner_search_qualifier(github, "owner-name")
+
+
+def test_pull_request_search_query_includes_review_requests_and_authored_prs():
+    assert rb.pull_request_search_query("org", "acme", "steve") == (
+        "is:open is:pr org:acme (review-requested:steve OR author:steve)"
+    )
+    assert rb.pull_request_search_query("user", "steve", "steve") == (
+        "is:open is:pr user:steve (review-requested:steve OR author:steve)"
+    )

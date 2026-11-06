@@ -49,7 +49,7 @@ def test_single_checkout_takes_precedence_over_nested_repositories(
     monkeypatch.setattr(rb, "WORKSPACE_PATH", checkout)
 
     assert rb.list_workspace_repositories() == [checkout]
-    assert rb.collect_cross_repo_context("service-one") == ""
+    assert rb.sibling_digests("service-one") == []
 
 
 def test_empty_workspace_has_no_repositories(tmp_path, monkeypatch):
@@ -58,22 +58,19 @@ def test_empty_workspace_has_no_repositories(tmp_path, monkeypatch):
     assert rb.list_workspace_repositories() == []
 
 
-def test_multi_repo_context_includes_only_other_direct_git_clones(tmp_path, monkeypatch):
+def test_sibling_digests_include_only_other_direct_git_clones(tmp_path, monkeypatch):
     (tmp_path / "service-one" / ".git").mkdir(parents=True)
-    (tmp_path / "service-one" / "README.md").write_text("Current repo context")
     (tmp_path / "service-two" / ".git").mkdir(parents=True)
-    (tmp_path / "service-two" / "README.md").write_text("Related repo context")
     (tmp_path / "other" / "nested" / ".git").mkdir(parents=True)
-    (tmp_path / "other" / "README.md").write_text("Non-Git directory context")
-    (tmp_path / "other" / "nested" / "README.md").write_text("Nested repo context")
     monkeypatch.setattr(rb, "WORKSPACE_PATH", tmp_path)
+    rb.write_digest("service-one", "sha", "Current repo digest")
+    rb.write_digest("service-two", "sha", "Related repo digest")
+    rb.write_digest("other", "sha", "Non-git directory digest")
+    rb.write_digest("service-three", "sha", "Nested repo digest")
 
-    context = rb.collect_cross_repo_context("service-one")
-
-    assert "Related repo context" in context
-    assert "Current repo context" not in context
-    assert "Non-Git directory context" not in context
-    assert "Nested repo context" not in context
+    assert rb.sibling_digests("service-one") == [
+        ("service-two", "Related repo digest"),
+    ]
 
 
 def test_is_workspace_repository():
@@ -121,10 +118,67 @@ def test_main_reviews_only_selected_repositories(
 
     qualifier = "user" if owner_type == "User" else "org"
     github.search_issues.assert_called_once_with(
-        f"is:open is:pr {qualifier}:owner review-requested:reviewer"
+        rb.pull_request_search_query(qualifier, "owner", "reviewer")
     )
     review.assert_called_once_with(included_pr, "owner/service-one", provider)
     excluded.repository.get_pull.assert_not_called()
+
+
+def _prepare_main_with_pr(tmp_path, monkeypatch, *, author, sha="abc123", state_keys=()):
+    workspace = tmp_path / "service-one"
+    (workspace / ".git").mkdir(parents=True)
+    monkeypatch.setattr(rb, "WORKSPACE_PATH", workspace)
+    monkeypatch.setattr(rb, "GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(rb, "GITHUB_USER", "reviewer")
+    monkeypatch.setattr(rb, "GITHUB_OWNER", "owner")
+    monkeypatch.setattr(rb, "GITHUB_ORG", "")
+    state_file = tmp_path / "state.txt"
+    if state_keys:
+        state_file.write_text("\n".join(state_keys) + "\n")
+    monkeypatch.setattr(rb, "STATE_FILE", state_file)
+
+    issue = mock.Mock()
+    issue.repository.name = "service-one"
+    issue.repository.full_name = "owner/service-one"
+    pr = issue.repository.get_pull.return_value
+    pr.user.login = author
+    pr.number = 42
+    pr.head.sha = sha
+    pr.get_issue_comments.return_value = []
+    github = mock.Mock()
+    github.get_user.return_value.type = "User"
+    github.search_issues.return_value = [issue]
+    monkeypatch.setattr(rb, "Github", mock.Mock(return_value=github))
+    provider = mock.Mock()
+    monkeypatch.setattr(rb, "load_ai_provider", mock.Mock(return_value=provider))
+    review = mock.Mock(return_value=True)
+    monkeypatch.setattr(rb, "review_pr", review)
+    return pr, provider, review
+
+
+def test_main_reviews_prs_authored_by_the_bot_user(tmp_path, monkeypatch):
+    pr, provider, review = _prepare_main_with_pr(
+        tmp_path, monkeypatch, author="reviewer"
+    )
+
+    assert rb.main() == 0
+
+    review.assert_called_once_with(pr, "owner/service-one", provider)
+
+
+def test_main_skips_authored_pr_when_commit_already_reviewed(tmp_path, monkeypatch):
+    pr, _provider, review = _prepare_main_with_pr(
+        tmp_path,
+        monkeypatch,
+        author="reviewer",
+        sha="abc123",
+        state_keys=["owner/service-one#42:abc123"],
+    )
+
+    assert rb.main() == 0
+
+    review.assert_not_called()
+    pr.get_issue_comments.assert_not_called()
 
 
 @pytest.mark.parametrize("single_repo", [False, True])
@@ -152,7 +206,7 @@ def test_review_pr_uses_workspace_layout_for_checkout_and_context(
 
     assert run_git.call_args_list[0] == mock.call(checkout, "fetch", "origin", "main")
     prompt = provider.request_review.call_args.args[0]
-    assert ("Related repo context" in prompt) is not single_repo
+    assert "Related repo context" not in prompt
     pr.create_issue_comment.assert_called_once()
 
 

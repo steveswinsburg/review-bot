@@ -4,10 +4,11 @@ Automated local code review bot.
 
 Runs exactly once per invocation (designed for a 60-minute cron job), acting
 under a personal GitHub account via a PAT. It finds open PRs in a target
-organization or personal account where the user is a requested reviewer,
-checks the PR branch out into a temporary git worktree inside the locally
-cloned repository, gathers cross-repository architectural context from sibling
-clones in the workspace, sends the combined payload to a configurable AI
+organization or personal account where the user is a requested reviewer or
+the author, checks the PR branch out into a temporary git worktree inside the
+locally cloned repository, includes that repository's rules and digests of
+sibling clones, reads other files only when the model asks, sends the payload
+to a configurable AI
 provider (local Ollama by default, or remote providers such as the Cursor API,
 OpenAI, or Anthropic via per-provider config files), and posts the resulting
 review as a PR comment.
@@ -85,28 +86,26 @@ AI_PROVIDER_CONFIG_DIR = Path(
 
 STATE_FILE = Path.home() / "reviewed_prs.txt"
 
-# Hard cap on the combined payload (diff + cross-repo context) sent to the
-# LLM, protecting its context window (overridable per provider config).
+# Hard cap on the combined payload (diff + rules + digests + requested files)
+# sent to the LLM, protecting its context window (overridable per provider).
 MAX_PAYLOAD_CHARS = 30_000
 
-# Filenames that carry systemic / architectural context in sibling repos.
-CONTEXT_FILE_CANDIDATES = (
+# Rule files read from the pull request worktree. Sibling repositories
+# contribute a digest instead of these bodies.
+RULE_FILE_NAMES = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
     "ARCHITECTURE.md",
     "architecture.md",
-    "API.md",
-    "api.md",
-    "openapi.yaml",
-    "openapi.yml",
-    "openapi.json",
-    "swagger.yaml",
-    "swagger.json",
-    "schema.graphql",
-    "CONTRIBUTING.md",
-    "README.md",
 )
 
 GIT_TIMEOUT_SECONDS = 120
 AI_TIMEOUT_SECONDS = 600
+FILE_CLIP_CHARS = 4_000
+MAX_READ_PATHS = 8
+MAX_MODEL_CALLS = 12
+DIGEST_DIR_NAME = ".review-bot"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -227,13 +226,268 @@ def is_workspace_repository(repository_name: str, workspace_repo_names: set[str]
     return repository_name in workspace_repo_names
 
 
-def collect_cross_repo_context(current_repo_name: str) -> str:
-    """Gather architectural/API context from the *other* local repo clones.
+def digest_file(repo_name: str) -> Path:
+    """Return the workspace-root digest path for one repository."""
+    return WORKSPACE_PATH / DIGEST_DIR_NAME / f"{repo_name}.md"
 
-    Reads well-known architectural files from the default branch working
-    trees of sibling repositories inside WORKSPACE_PATH.
-    """
+
+def write_digest(repo_name: str, sha: str, body: str) -> None:
+    """Write one repository digest beside the clones."""
+    path = digest_file(repo_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"sha: {sha}\n{body}", encoding="utf-8")
+
+
+def read_digest(repo_name: str):
+    """Return (sha, body) for a repository digest, or None when unreadable."""
+    path = digest_file(repo_name)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning("Could not read digest %s: %s", path, exc)
+        return None
+    sha_line, newline, body = text.partition("\n")
+    prefix = "sha: "
+    if newline != "\n" or not sha_line.startswith(prefix):
+        log.warning("Digest %s is missing its sha line.", path)
+        return None
+    return sha_line[len(prefix):].strip(), body
+
+
+def digest_is_fresh(repo_path: Path) -> bool:
+    """Return whether the stored digest matches the clone's current HEAD."""
+    stored = read_digest(repo_path.name)
+    if stored is None:
+        return False
+    try:
+        head = run_git(repo_path, "rev-parse", "HEAD").strip()
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("Could not read HEAD for %s: %s", repo_path, exc)
+        return False
+    return stored[0] == head
+
+
+def _safe_repo_name(repo_name: str) -> bool:
+    return (
+        bool(repo_name)
+        and repo_name not in (".", "..")
+        and "/" not in repo_name
+        and "\\" not in repo_name
+    )
+
+
+def workspace_clone(repo_name: str):
+    """Return the workspace checkout for repo_name, or None."""
+    if not _safe_repo_name(repo_name):
+        return None
+    if (WORKSPACE_PATH / ".git").exists():
+        if WORKSPACE_PATH.name == repo_name:
+            return WORKSPACE_PATH
+        return None
+    candidate = WORKSPACE_PATH / repo_name
+    try:
+        if candidate.resolve().parent != WORKSPACE_PATH.resolve():
+            return None
+    except OSError:
+        return None
+    if candidate.is_dir() and (candidate / ".git").exists():
+        return candidate
+    return None
+
+
+def read_file_within(base: Path, relative_path: str):
+    """Read a file that stays inside base, clipped to FILE_CLIP_CHARS."""
+    if not relative_path or relative_path.startswith(("/", "\\")):
+        return None
+    try:
+        base_resolved = base.resolve()
+        candidate = (base / relative_path).resolve()
+        candidate.relative_to(base_resolved)
+    except (OSError, ValueError):
+        return None
+    if not candidate.is_file():
+        return None
+    try:
+        return candidate.read_text(encoding="utf-8", errors="replace")[:FILE_CLIP_CHARS]
+    except OSError as exc:
+        log.warning("Could not read %s: %s", candidate, exc)
+        return None
+
+
+def read_workspace_file(repo_name: str, relative_path: str, root: Path = None):
+    """Read a file inside a workspace clone, or inside an explicit root."""
+    base = root if root is not None else workspace_clone(repo_name)
+    if base is None:
+        return None
+    return read_file_within(base, relative_path)
+
+
+def strip_model_wrapper(text: str) -> str:
+    """Remove one leading think block and one surrounding code fence."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("<think>"):
+        end = cleaned.find("</think>")
+        if end != -1:
+            cleaned = cleaned[end + len("</think>"):].strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    return cleaned
+
+
+def classify_model_reply(text: str):
+    """Return ('read', paths), ('review', text), or ('stop', reason)."""
+    cleaned = strip_model_wrapper(text)
+    if not cleaned:
+        return "stop", "empty"
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return "stop", "invalid"
+        reads = data.get("read") if isinstance(data, dict) else None
+        if (
+            isinstance(data, dict)
+            and set(data) == {"read"}
+            and isinstance(reads, list)
+            and all(isinstance(item, str) for item in reads)
+        ):
+            return "read", reads
+        return "stop", "invalid"
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if lines and all(line.endswith("?") for line in lines):
+        return "stop", "question"
+    return "review", cleaned
+
+
+def build_digest_prompt(repo_path: Path, sha: str, max_chars: int) -> str:
+    """Ask the configured model for one repository digest."""
+    try:
+        file_list = run_git(repo_path, "ls-files")
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("Could not list files in %s: %s", repo_path, exc)
+        file_list = ""
+    rules = _labeled_block(collect_rules(repo_path))
+    intro = (
+        f"Document the repository '{repo_path.name}' at commit {sha}.\n"
+        "Write a digest of its exports, routes, and types. "
+        "Be specific and concise. Do not ask questions. Do not request files. "
+        "Reply with the digest only.\n\n"
+    )
+    rules_section = f"Rules:\n{rules}\n\n" if rules else ""
+    files_header = "File list:\n"
+    budget = max_chars - len(intro) - len(rules_section) - len(files_header)
+    if budget < 0:
+        rules_section = rules_section[: max(0, max_chars - len(intro))]
+        budget = max_chars - len(intro) - len(rules_section) - len(files_header)
+    if budget < 0:
+        budget = 0
+    return intro + rules_section + files_header + file_list[:budget]
+
+
+def refresh_sibling_digests(repo_paths, repos_under_review, provider) -> None:
+    """Rebuild stale digests for clones that provide context to this run."""
+    if len(repo_paths) <= 1 or not repos_under_review:
+        return
+    for repo_path in repo_paths:
+        if not any(name != repo_path.name for name in repos_under_review):
+            continue
+        if digest_is_fresh(repo_path):
+            log.info("Digest for %s is current.", repo_path.name)
+            continue
+        try:
+            sha = run_git(repo_path, "rev-parse", "HEAD").strip()
+            prompt = build_digest_prompt(
+                repo_path, sha, provider.max_payload_chars
+            )
+            reply = provider.request_review(prompt)
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            urllib.error.URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            AIProviderError,
+        ) as exc:
+            log.error("Could not digest %s: %s", repo_path.name, exc)
+            continue
+        kind, value = classify_model_reply(reply)
+        if kind != "review":
+            log.error(
+                "Could not digest %s: model returned %s.", repo_path.name, value
+            )
+            continue
+        body = value if value.endswith("\n") else value + "\n"
+        write_digest(repo_path.name, sha, body)
+        log.info("Wrote digest for %s at %s.", repo_path.name, sha)
+
+
+def read_requested_files(paths, repo_name: str, worktree: Path):
+    """Read up to MAX_READ_PATHS files named as repo/relative-path."""
     sections = []
+    for spec in paths[:MAX_READ_PATHS]:
+        if not isinstance(spec, str) or "/" not in spec:
+            continue
+        name, relative = spec.split("/", 1)
+        if not _safe_repo_name(name) or not relative:
+            continue
+        if name == repo_name:
+            root = worktree
+        else:
+            root = workspace_clone(name)
+            if root is None:
+                continue
+        text = read_file_within(root, relative)
+        if text is None:
+            continue
+        sections.append((spec, text))
+    return sections
+
+
+def collect_rules(root: Path):
+    """Return (label, text) rule files from a checkout, clipped per file."""
+    if not root.is_dir():
+        return []
+    sections = []
+    seen = set()
+
+    def add(relative: str) -> None:
+        try:
+            resolved = (root / relative).resolve()
+            resolved.relative_to(root.resolve())
+        except (OSError, ValueError):
+            return
+        if resolved in seen:
+            return
+        text = read_file_within(root, relative)
+        if not text:
+            return
+        seen.add(resolved)
+        sections.append((relative, text))
+
+    for name in RULE_FILE_NAMES:
+        add(name)
+    rules_dir = root / ".cursor" / "rules"
+    if not rules_dir.is_dir():
+        return sections
+    for path in sorted(item for item in rules_dir.rglob("*") if item.is_file()):
+        try:
+            relative = path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            continue
+        add(relative)
+    return sections
+
+
+def sibling_digests(current_repo_name: str):
+    """Return (repo name, digest body) for other clones in the workspace."""
     try:
         siblings = [
             path for path in list_workspace_repositories()
@@ -241,23 +495,59 @@ def collect_cross_repo_context(current_repo_name: str) -> str:
         ]
     except OSError as exc:
         log.warning("Could not list workspace %s: %s", WORKSPACE_PATH, exc)
-        return ""
-
+        return []
+    sections = []
     for sibling in siblings:
-        for candidate in CONTEXT_FILE_CANDIDATES:
-            candidate_path = sibling / candidate
-            if candidate_path.is_file():
-                try:
-                    content = candidate_path.read_text(
-                        encoding="utf-8", errors="replace"
-                    )[:3_000]
-                except OSError:
-                    continue
-                sections.append(
-                    f"--- Context from sibling repo '{sibling.name}' "
-                    f"({candidate}) ---\n{content}\n"
-                )
-    return "\n".join(sections)
+        stored = read_digest(sibling.name)
+        if stored is None:
+            continue
+        _sha, body = stored
+        if body.strip():
+            sections.append((sibling.name, body))
+    return sections
+
+
+def _labeled_block(pairs) -> str:
+    return "\n".join(f"--- {label} ---\n{text}" for label, text in pairs)
+
+
+def assemble_review_payload(
+    base_branch, diff_text, rules, digests, files, max_chars
+) -> str:
+    """Build the review payload, dropping context before cutting the diff."""
+    header = f"=== PR DIFF (git diff origin/{base_branch}...HEAD) ===\n"
+
+    def render(diff, rule_pairs, digest_pairs, file_pairs) -> str:
+        parts = [header + diff]
+        if rule_pairs:
+            parts.append("=== REPOSITORY RULES ===\n" + _labeled_block(rule_pairs))
+        if digest_pairs:
+            parts.append(
+                "=== SIBLING REPOSITORY DIGESTS ===\n"
+                + _labeled_block(digest_pairs)
+            )
+        if file_pairs:
+            parts.append("=== REQUESTED FILES ===\n" + _labeled_block(file_pairs))
+        return "\n\n".join(parts)
+
+    for rule_pairs, digest_pairs, file_pairs in (
+        (rules, digests, files),
+        (rules, digests, []),
+        (rules, [], []),
+        ([], [], []),
+    ):
+        payload = render(diff_text, rule_pairs, digest_pairs, file_pairs)
+        if len(payload) <= max_chars:
+            return payload
+
+    marker = "\n\n[diff truncated]"
+    keep = max_chars - len(header) - len(marker)
+    if keep < 0:
+        keep = 0
+    payload = header + diff_text[:keep] + marker
+    if len(payload) > max_chars:
+        payload = payload[: max_chars - len(marker)] + marker
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +711,21 @@ def load_ai_provider(name: str) -> AIProvider:
     )
 
 
+def pull_request_search_query(qualifier: str, owner: str, user: str) -> str:
+    """Return the GitHub search query for PRs this bot should consider.
+
+    Includes PRs that request ``user`` as a reviewer *and* PRs that ``user``
+    authored. GitHub will not let a pull request author request themselves as
+    an individual reviewer, so authored PRs must be selected explicitly.
+    Parentheses keep ``author:`` scoped to the same owner as the rest of the
+    query.
+    """
+    return (
+        f"is:open is:pr {qualifier}:{owner} "
+        f"(review-requested:{user} OR author:{user})"
+    )
+
+
 def owner_search_qualifier(
     gh: Github, owner: str, force_organization: bool = False
 ) -> str:
@@ -443,15 +748,14 @@ with full visibility into the wider local codebase layout of this organization.
 
 A pull request has been opened in repository '{repo_full_name}' (PR #{pr_number}: \
 {pr_title}). Below you will find the raw git diff of the PR branch against the \
-base branch, followed by architectural and API-definition context extracted \
-from the neighboring, tightly-coupled repositories in the same workspace.
+base branch, the rules from that repository, and digests of the other \
+repositories in this workspace.
 
 Your tasks:
 1. Review the diff for correctness, security, performance, and maintainability.
 2. Critically evaluate whether these changes will break contracts, schemas, \
-APIs, or dependencies in the neighboring repositories whose context is provided.
-3. Flag anything that violates the systemic architectural guidelines you can \
-see in the provided context.
+APIs, or dependencies in the neighboring repositories whose digests are provided.
+3. Flag anything that violates the rules from the repository under review.
 
 Output format requirements:
 - Respond in clean, highly scannable markdown.
@@ -465,6 +769,11 @@ to you, and you cannot implement follow-up changes.
 - Do not end with invitations or closings such as "if you like", "let me know", \
 "happy to", "I can also", "we can", or "would you like".
 - State findings and concrete recommended changes directly, then stop.
+- To read files before finishing, reply with only a JSON object of this form \
+and no other text: {{"read":["repo-name/relative/path"]}}
+- Request at most 8 paths. Each path is a workspace repository name, a slash, \
+and the path inside that repository.
+- Any other reply is posted as the review. A question is not posted.
 
 {payload}
 """
@@ -512,30 +821,44 @@ def review_pr(pr, repo_full_name: str, provider: AIProvider) -> bool:
                      repo_full_name, pr.number)
             return True
 
-        # Cross-reference neighboring repositories for systemic context.
-        cross_repo_context = collect_cross_repo_context(repo_name)
-
-        payload = (
-            "=== PR DIFF (git diff origin/"
-            f"{base_branch}...HEAD) ===\n{diff_text}\n\n"
-            "=== CROSS-REPOSITORY ARCHITECTURAL CONTEXT ===\n"
-            f"{cross_repo_context}"
-        )
-        if len(payload) > provider.max_payload_chars:
-            payload = (payload[:provider.max_payload_chars]
-                       + "\n\n[payload truncated]")
-
-        prompt = REVIEW_PROMPT_TEMPLATE.format(
-            repo_full_name=repo_full_name,
-            pr_number=pr.number,
-            pr_title=pr.title,
-            payload=payload,
-        )
-
-        review_text = provider.request_review(prompt)
-        if not review_text:
-            log.error("AI provider '%s' returned an empty review for %s#%d.",
-                      provider.name, repo_full_name, pr.number)
+        rules = collect_rules(worktree_dir)
+        digests = sibling_digests(repo_name)
+        requested = []
+        review_text = None
+        for _attempt in range(MAX_MODEL_CALLS):
+            payload = assemble_review_payload(
+                base_branch=base_branch,
+                diff_text=diff_text,
+                rules=rules,
+                digests=digests,
+                files=requested,
+                max_chars=provider.max_payload_chars,
+            )
+            prompt = REVIEW_PROMPT_TEMPLATE.format(
+                repo_full_name=repo_full_name,
+                pr_number=pr.number,
+                pr_title=pr.title,
+                payload=payload,
+            )
+            reply = provider.request_review(prompt)
+            kind, value = classify_model_reply(reply)
+            if kind == "read":
+                requested = read_requested_files(value, repo_name, worktree_dir)
+                continue
+            if kind == "review":
+                review_text = value
+                break
+            log.error(
+                "AI provider '%s' returned %s instead of a review for %s#%d.",
+                provider.name, value, repo_full_name, pr.number,
+            )
+            return False
+        else:
+            log.error(
+                "AI provider '%s' did not settle on a review for %s#%d "
+                "after %d calls.",
+                provider.name, repo_full_name, pr.number, MAX_MODEL_CALLS,
+            )
             return False
 
         comment = (
@@ -649,10 +972,7 @@ def main() -> int:
              provider.name, provider.api_style, provider.model)
 
     try:
-        query = (
-            f"is:open is:pr {qualifier}:{owner} "
-            f"review-requested:{GITHUB_USER}"
-        )
+        query = pull_request_search_query(qualifier, owner, GITHUB_USER)
         issues = list(gh.search_issues(query))
     except GithubException as exc:
         log.error("GitHub search failed (will retry next cycle): %s", exc)
@@ -663,13 +983,16 @@ def main() -> int:
         return 1
 
     log.info(
-        "Found %d open PR(s) requesting review from %s under %s %s; "
-        "limiting reviews to %d checked-out repository/repositories.",
-        len(issues), GITHUB_USER, "organization" if qualifier == "org"
-        else "user", owner, len(workspace_repo_names),
+        "Found %d open PR(s) requesting review from %s or authored by "
+        "%s under %s %s; limiting reviews to %d checked-out "
+        "repository/repositories.",
+        len(issues), GITHUB_USER, GITHUB_USER,
+        "organization" if qualifier == "org" else "user", owner,
+        len(workspace_repo_names),
     )
 
     failures = 0
+    pending = []
     for issue in issues:
         try:
             repository = issue.repository
@@ -683,15 +1006,6 @@ def main() -> int:
             continue
 
         state_key = f"{repo_full_name}#{pr.number}:{pr.head.sha}"
-
-        # Guard clause: never review my own PRs (prevents self-review loops).
-        if pr.user.login == GITHUB_USER:
-            log.info("Skipping own PR %s#%d (authored by %s).",
-                     repo_full_name, pr.number, GITHUB_USER)
-            if state_key not in reviewed_states:
-                mark_state_reviewed(state_key)
-                reviewed_states.add(state_key)
-            continue
 
         if state_key in reviewed_states:
             log.info("Already reviewed %s; skipping.", state_key)
@@ -707,6 +1021,16 @@ def main() -> int:
             reviewed_states.add(state_key)
             continue
 
+        pending.append((pr, repo_full_name, state_key))
+
+    if pending:
+        refresh_sibling_digests(
+            workspace_repositories,
+            {repo_full_name.split("/", 1)[1] for _pr, repo_full_name, _key in pending},
+            provider,
+        )
+
+    for pr, repo_full_name, state_key in pending:
         log.info("Reviewing %s ...", state_key)
         if review_pr(pr, repo_full_name, provider):
             mark_state_reviewed(state_key)
