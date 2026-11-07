@@ -7,6 +7,8 @@
 
 ---
 
+[![CI](https://github.com/steveswinsburg/review-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/steveswinsburg/review-bot/actions/workflows/ci.yml)
+
 ## What it does
 
 Review Bot is a small Python script built to run on a schedule. It finds open pull requests in a GitHub organization or personal account that have been assigned to you for review, asks an AI provider to review the changes, and posts the result as a pull request comment.
