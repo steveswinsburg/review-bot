@@ -97,13 +97,15 @@ def _prepare_two_repo_run(tmp_path, monkeypatch, *, issues):
     monkeypatch.setattr(rb, "GITHUB_ORG", "")
     monkeypatch.setattr(rb, "STATE_FILE", tmp_path / "state.txt")
     monkeypatch.setattr(rb, "run_git", _git_stub)
+    sync = mock.Mock(return_value=0)
+    monkeypatch.setattr(rb, "sync_workspace_repositories", sync)
     github = mock.Mock()
     github.get_user.return_value.type = "User"
     github.search_issues.return_value = issues
     monkeypatch.setattr(rb, "Github", mock.Mock(return_value=github))
     provider = mock.Mock(max_payload_chars=30000, name="ollama")
     monkeypatch.setattr(rb, "load_ai_provider", mock.Mock(return_value=provider))
-    return workspace, provider
+    return workspace, provider, sync
 
 
 def _pull_request_issue():
@@ -121,7 +123,9 @@ def test_review_run_writes_a_stale_sibling_digest_before_reviewing(
     tmp_path, monkeypatch
 ):
     issue, _pr = _pull_request_issue()
-    _workspace, provider = _prepare_two_repo_run(tmp_path, monkeypatch, issues=[issue])
+    _workspace, provider, sync = _prepare_two_repo_run(
+        tmp_path, monkeypatch, issues=[issue]
+    )
     events = []
 
     def digest_reply(prompt):
@@ -140,6 +144,7 @@ def test_review_run_writes_a_stale_sibling_digest_before_reviewing(
 
     assert rb.main() == 0
 
+    sync.assert_called_once()
     assert events == ["digest", "review"]
     assert rb.read_digest("service-two") == ("abc123", "exports: Widget\n")
     assert rb.read_digest("service-one") is None
@@ -147,7 +152,9 @@ def test_review_run_writes_a_stale_sibling_digest_before_reviewing(
 
 def test_review_run_skips_a_fresh_sibling_digest(tmp_path, monkeypatch):
     issue, _pr = _pull_request_issue()
-    _workspace, provider = _prepare_two_repo_run(tmp_path, monkeypatch, issues=[issue])
+    _workspace, provider, _sync = _prepare_two_repo_run(
+        tmp_path, monkeypatch, issues=[issue]
+    )
     rb.write_digest("service-two", "abc123", "exports: Widget\n")
     review = mock.Mock(return_value=True)
     monkeypatch.setattr(rb, "review_pr", review)
@@ -161,7 +168,9 @@ def test_review_run_skips_a_fresh_sibling_digest(tmp_path, monkeypatch):
 def test_review_run_with_nothing_to_review_does_not_build_digests(
     tmp_path, monkeypatch
 ):
-    _workspace, provider = _prepare_two_repo_run(tmp_path, monkeypatch, issues=[])
+    _workspace, provider, _sync = _prepare_two_repo_run(
+        tmp_path, monkeypatch, issues=[]
+    )
     review = mock.Mock(return_value=True)
     monkeypatch.setattr(rb, "review_pr", review)
 
@@ -186,6 +195,7 @@ def test_digest_failure_still_posts_a_review_with_fresh_digests(
     monkeypatch.setattr(rb, "STATE_FILE", tmp_path / "state.txt")
     monkeypatch.setattr(rb, "run_git", _git_stub)
     monkeypatch.setattr(rb, "detect_base_branch", mock.Mock(return_value="main"))
+    monkeypatch.setattr(rb, "sync_workspace_repositories", mock.Mock(return_value=0))
     monkeypatch.setattr(rb.subprocess, "run", mock.Mock())
     rb.write_digest("service-three", "abc123", "Fresh sibling digest\n")
     issue, pr = _pull_request_issue()

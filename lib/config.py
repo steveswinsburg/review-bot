@@ -7,6 +7,8 @@ FILE_CLIP_CHARS = 4_000
 MAX_READ_PATHS = 8
 MAX_MODEL_CALLS = 12
 DIGEST_DIR_NAME = ".review-bot"
+LOG_FILE_NAME = "review-bot.log"
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 RULE_FILE_NAMES = (
     "AGENTS.md",

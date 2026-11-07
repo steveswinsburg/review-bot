@@ -87,6 +87,51 @@ def read_digest(workspace_path: Path, repo_name: str):
     return sha_line[len(prefix):].strip(), body
 
 
+def sync_clone_to_default_branch(
+    repo_path: Path,
+    run_git_command,
+    detect_base_branch_fn,
+) -> bool:
+    """Fetch and align one clone with origin's default branch (main or master)."""
+    try:
+        base = detect_base_branch_fn(repo_path)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.error("Could not detect default branch for %s: %s", repo_path.name, exc)
+        return False
+
+    try:
+        run_git_command(repo_path, "fetch", "origin", base)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.error("Could not fetch origin/%s for %s: %s", base, repo_path.name, exc)
+        return False
+
+    try:
+        run_git_command(repo_path, "checkout", "-B", base, f"origin/{base}")
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.error(
+            "Could not sync %s to origin/%s: %s", repo_path.name, base, exc
+        )
+        return False
+
+    log.info("Synced %s to origin/%s.", repo_path.name, base)
+    return True
+
+
+def sync_workspace_repositories(
+    repo_paths: list[Path],
+    run_git_command,
+    detect_base_branch_fn,
+) -> int:
+    """Sync every workspace clone to its default branch. Returns failure count."""
+    failures = 0
+    for repo_path in repo_paths:
+        if not sync_clone_to_default_branch(
+            repo_path, run_git_command, detect_base_branch_fn
+        ):
+            failures += 1
+    return failures
+
+
 def digest_is_fresh(workspace_path: Path, repo_path: Path, run_git_command) -> bool:
     """Return whether the stored digest matches the clone's current HEAD."""
     stored = read_digest(workspace_path, repo_path.name)
