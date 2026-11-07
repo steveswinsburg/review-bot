@@ -32,6 +32,8 @@ Optional environment variables:
                           (default: http://localhost:11434).
     OLLAMA_MODEL          Legacy override for the ollama provider's model
                           (default: llama3).
+    REVIEW_BOT_LOG        Optional. Log file path for this run. Defaults to
+                          <WORKSPACE_PATH>/.review-bot/review-bot.log.
 
 The implementation lives in lib/. This module keeps the cron entry point and
 the settings tests patch: workspace path, GitHub credentials, state file, and
@@ -47,6 +49,9 @@ from pathlib import Path
 
 from github import Github, GithubException
 
+from lib.config import LOG_FORMAT
+from lib.logging_config import attach_workspace_log_file as _attach_workspace_log_file
+from lib.logging_config import workspace_log_path as _workspace_log_path
 from lib.provider import (
     AIProvider,
     AIProviderError,
@@ -82,6 +87,7 @@ GITHUB_ORG = os.environ.get("GITHUB_ORG", "")
 WORKSPACE_PATH = Path(
     os.path.expanduser(os.environ.get("WORKSPACE_PATH", ""))
 )
+REVIEW_BOT_LOG = os.environ.get("REVIEW_BOT_LOG", "")
 
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "ollama")
 AI_PROVIDER_CONFIG_DIR = Path(
@@ -97,10 +103,11 @@ STATE_FILE = Path.home() / "reviewed_prs.txt"
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format=LOG_FORMAT,
     stream=sys.stdout,
 )
 log = logging.getLogger("review-bot")
+log.setLevel(logging.INFO)
 
 # Re-exported for callers and tests. The implementations live in lib/.
 __all__ = [
@@ -130,11 +137,13 @@ __all__ = [
     "pull_request_search_query",
     "read_digest",
     "read_workspace_file",
+    "REVIEW_BOT_LOG",
     "review_pr",
     "run_git",
     "sibling_digests",
     "state_marker",
     "sync_workspace_repositories",
+    "workspace_log_path",
     "write_digest",
 ]
 
@@ -199,6 +208,16 @@ def load_ai_provider(name: str) -> AIProvider:
     return _load_ai_provider(name, AI_PROVIDER_CONFIG_DIR)
 
 
+def workspace_log_path():
+    """Return the log file path for the configured workspace."""
+    return _workspace_log_path(WORKSPACE_PATH, REVIEW_BOT_LOG)
+
+
+def attach_workspace_log_file() -> Path:
+    """Write logs under the workspace (and still echo to stdout)."""
+    return _attach_workspace_log_file(WORKSPACE_PATH, REVIEW_BOT_LOG)
+
+
 def sync_workspace_repositories(repo_paths) -> int:
     """Fetch and reset workspace clones to origin's default branch."""
     return _sync_workspace_repositories(repo_paths, run_git, detect_base_branch)
@@ -243,6 +262,12 @@ def main() -> int:
 
     if not WORKSPACE_PATH.is_dir():
         log.error("WORKSPACE_PATH does not exist: %s", WORKSPACE_PATH)
+        return 1
+
+    try:
+        attach_workspace_log_file()
+    except OSError as exc:
+        log.error("Could not open workspace log file: %s", exc)
         return 1
 
     try:

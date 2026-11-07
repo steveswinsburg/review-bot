@@ -81,6 +81,7 @@ the selected workspace repositories are ignored.
 ```text
 ~/code/review-workspace/       # WORKSPACE_PATH
 ├── .review-bot/
+│   ├── review-bot.log         # append-only log for this workspace
 │   ├── service-one.md         # commit SHA, then exports, routes, and types
 │   └── service-two.md
 ├── service-one/               # clone of your-org/service-one
@@ -116,6 +117,7 @@ needed. The token must be able to access the target repositories, and
 | `OPENAI_API_KEY` | Required when using the bundled `openai` provider. | `OPENAI_API_KEY="your-openai-api-key"` |
 | `CURSOR_API_KEY` | Required when using the bundled `cursor` provider. | `CURSOR_API_KEY="your-cursor-api-key"` |
 | `ANTHROPIC_API_KEY` | Required when using the bundled `anthropic` provider. | `ANTHROPIC_API_KEY="your-anthropic-api-key"` |
+| `REVIEW_BOT_LOG` | Optional. Log file for this workspace run. Defaults to `<WORKSPACE_PATH>/.review-bot/review-bot.log`. | `REVIEW_BOT_LOG="$HOME/logs/acme-review.log"` |
 
 The default provider is local Ollama (`llama3` at `http://localhost:11434`).
 For an organization, you can use either configuration:
@@ -175,8 +177,12 @@ and development, omit `--locked` so uv can update the lockfile when dependencies
 change.
 
 ```cron
-0 * * * * cd "$HOME/review-bot" && GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_OWNER="your-org" WORKSPACE_PATH="$HOME/code/review-workspace" uv run --locked python review_bot.py >> "$HOME/review-bot/review_bot.log" 2>&1
+0 * * * * cd "$HOME/review-bot" && GITHUB_TOKEN="your-token" GITHUB_USER="your-username" GITHUB_OWNER="your-org" WORKSPACE_PATH="$HOME/code/review-workspace" uv run --locked python review_bot.py
 ```
+
+Each cron job with a different `WORKSPACE_PATH` writes its own
+`<WORKSPACE_PATH>/.review-bot/review-bot.log`. Set `REVIEW_BOT_LOG` when you want
+a custom path. Output still goes to stdout for ad hoc runs.
 
 The bot records processed `owner/repo#PR:COMMIT_SHA` states in `~/reviewed_prs.txt`. Each posted comment also contains a hidden state marker, allowing the bot to recover if the local state file is lost. A new commit on a PR is treated as a new review.
 

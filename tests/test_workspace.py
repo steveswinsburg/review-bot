@@ -92,6 +92,26 @@ def test_sync_clone_hard_resets_to_origin_default_branch(tmp_path, monkeypatch):
     ]
 
 
+def test_main_writes_logs_under_the_workspace(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(rb, "WORKSPACE_PATH", workspace)
+    monkeypatch.setattr(rb, "GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(rb, "GITHUB_USER", "reviewer")
+    monkeypatch.setattr(rb, "GITHUB_OWNER", "owner")
+    monkeypatch.setattr(rb, "GITHUB_ORG", "")
+    github = mock.Mock()
+    github.get_user.return_value.type = "User"
+    monkeypatch.setattr(rb, "Github", mock.Mock(return_value=github))
+
+    assert rb.main() == 0
+
+    log_file = workspace / ".review-bot" / "review-bot.log"
+    assert log_file.is_file()
+    assert "Logging to" in log_file.read_text(encoding="utf-8")
+    assert "nothing to review" in log_file.read_text(encoding="utf-8")
+
+
 def test_main_syncs_workspace_only_when_a_pr_is_pending(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     (workspace / "service-one" / ".git").mkdir(parents=True)
