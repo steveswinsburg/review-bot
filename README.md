@@ -61,10 +61,13 @@ personal accounts:
 - **Multiple repositories:** Otherwise, the bot selects Git clones directly
   inside `WORKSPACE_PATH`. Only those repositories are eligible for review.
   Each other clone can contribute a digest at
-  `.review-bot/<repo>.md` in the workspace root. The review run rebuilds a
-  sibling digest when that file is missing or its commit differs from the
-  clone, before reviewing. Nested repositories and non-Git directories are
-  ignored. `.review-bot` is not a repository.
+  `.review-bot/<repo>.md` in the workspace root. When there is at least one PR
+  to review, the bot fetches and hard-resets each workspace clone to
+  `origin/main` or `origin/master`. It then rebuilds a sibling digest only when
+  that file is missing or its stored commit differs from the clone's current
+  `HEAD`, before reviewing. Nested repositories and non-Git directories are
+  ignored. `.review-bot` is not a repository. Point `WORKSPACE_PATH` at
+  bot-only checkouts on the cron host.
 - **No repositories:** The bot logs that there is nothing to review and exits
   successfully.
 

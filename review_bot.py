@@ -72,6 +72,7 @@ from lib.workspace import read_digest as _read_digest
 from lib.workspace import read_workspace_file as _read_workspace_file
 from lib.workspace import run_git as _run_git
 from lib.workspace import sibling_digests as _sibling_digests
+from lib.workspace import sync_workspace_repositories as _sync_workspace_repositories
 from lib.workspace import write_digest as _write_digest
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
@@ -133,6 +134,7 @@ __all__ = [
     "run_git",
     "sibling_digests",
     "state_marker",
+    "sync_workspace_repositories",
     "write_digest",
 ]
 
@@ -195,6 +197,11 @@ def already_reviewed_on_github(pr, state_key: str) -> bool:
 def load_ai_provider(name: str) -> AIProvider:
     """Load providers/<name>.json from the configured directory."""
     return _load_ai_provider(name, AI_PROVIDER_CONFIG_DIR)
+
+
+def sync_workspace_repositories(repo_paths) -> int:
+    """Fetch and reset workspace clones to origin's default branch."""
+    return _sync_workspace_repositories(repo_paths, run_git, detect_base_branch)
 
 
 def refresh_sibling_digests(repo_paths, repos_under_review, provider) -> None:
@@ -332,6 +339,13 @@ def main() -> int:
         pending.append((pr, repo_full_name, state_key))
 
     if pending:
+        sync_failures = sync_workspace_repositories(workspace_repositories)
+        if sync_failures:
+            log.warning(
+                "%d workspace clone(s) could not be synced to the default "
+                "branch; sibling context may be stale.",
+                sync_failures,
+            )
         refresh_sibling_digests(
             workspace_repositories,
             {repo_full_name.split("/", 1)[1] for _pr, repo_full_name, _key in pending},
